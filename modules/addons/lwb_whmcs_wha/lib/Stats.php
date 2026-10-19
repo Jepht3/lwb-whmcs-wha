@@ -76,7 +76,9 @@ class Stats
     {
         $dayStart = Time::server(Time::now()->setTime(0, 0));
         $week = date('Y-m-d H:i:s', time() - 7 * 86400);
-        $sentWeek = Capsule::table(Queue::TABLE)->where('status', 'sent')->whereIn('source', ['auto', 'manual'])->where('sent_at', '>=', $week);
+        // Seuls les messages suivis par la passerelle (identifiant WhatsApp connu) comptent.
+        $sentWeek = Capsule::table(Queue::TABLE)->where('status', 'sent')->whereIn('source', ['auto', 'manual'])
+            ->whereNotNull('wa_id')->where('sent_at', '>=', $week);
         $sent7 = (clone $sentWeek)->count();
         $read7 = (clone $sentWeek)->where('delivery', 'read')->count();
         return [

@@ -54,7 +54,7 @@ class Events
                 'message' => "{greeting} {first_name} 😊\n\n"
                     . "Petit rappel amical : votre facture *n°{invoice_id}* de *{balance}* arrive à échéance *{due_when}*.\n"
                     . "{early_discount}\n"
-                    . "👉 Réglez-la en quelques secondes ({payment_methods}) :\n{pay_link}\n\n"
+                    . "👉 Réglez-la en quelques secondes par {payment_methods} :\n{pay_link}\n\n"
                     . "Vos services continuent ainsi sans interruption. Déjà réglée ? Merci, ignorez simplement ce message !" . $sign,
             ],
             'invoice_overdue_1' => [
