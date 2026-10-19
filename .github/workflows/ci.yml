@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  php:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['7.4', '8.1', '8.2', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, curl
+          coverage: none
+      - name: Lint
+        run: find modules tests -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Tests
+        run: php tests/run.php
+
+  gateway:
+    name: Passerelle Node.js
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        run: npm ci --omit=dev --ignore-scripts
+      - name: Check
+        run: node --check server.js
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [php, gateway]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package
+        run: |
+          NAME="lwb-whmcs-wha-${GITHUB_REF_NAME}"
+          mkdir -p "dist/$NAME/gateway"
+          cp -r modules "dist/$NAME/"
+          cp gateway/server.js gateway/package.json gateway/package-lock.json gateway/.env.example gateway/ecosystem.config.cjs "dist/$NAME/gateway/"
+          cp README.md CHANGELOG.md "dist/$NAME/"
+          (cd dist && zip -r "$NAME.zip" "$NAME")
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

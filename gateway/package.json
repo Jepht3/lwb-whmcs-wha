@@ -1,0 +1,20 @@
+{
+  "name": "lwb-whmcs-wha-gateway",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Passerelle WhatsApp Web auto-hébergée (Baileys) pour le module WHMCS lwb-whmcs-wha",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=22.9"
+  },
+  "dependencies": {
+    "baileys": "7.0.0-rc14",
+    "pino": "10.4.0",
+    "qrcode": "1.5.4"
+  }
+}

@@ -1,0 +1,12 @@
+# Dépendances et données de la passerelle (session WhatsApp, clé API)
+node_modules/
+gateway/data/
+gateway/.env
+gateway/*.log
+gateway/*.log.*
+
+# Fichiers locaux : guide propre au serveur, archives, réglages de l'éditeur
+_local/
+.claude/
+includes/
+*.zip

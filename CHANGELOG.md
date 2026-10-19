@@ -1,0 +1,44 @@
+# Journal des versions
+
+## 3.0.0 — 2026-10-19
+
+Nouveau nom : **lwb-whmcs-wha** (module WHMCS `lwb_whmcs_wha`), code réorganisé en classes (`LwbWha\…`).
+
+**Module WHMCS**
+- File d'attente et journal unifiés ; priorités ; durée de validité par notification.
+- Revalidation juste avant l'envoi : facture payée, service réactivé, domaine renouvelé, client fermé.
+- Fusion : la confirmation de commande remplace « nouvelle facture » et « bienvenue » arrivés ensemble.
+- Espacement minimal et plafond quotidien par client ; heures calmes dans le fuseau des clients.
+- Messages recalculés à l'envoi (montants, remise, liens toujours à jour).
+- Liens courts suivis sur le domaine WHMCS, valables à vie, avec comptage des clics.
+- Nouvelles variables : `{greeting}`, `{due_when}`, `{suspend_when}`, `{payment_methods}`, `{order_items}`, `{welcome_line}`…
+- Alertes équipe sur WhatsApp : paiement, commande, nouveau ticket, réponse client, résiliation.
+- Statuts distribué / lu, statistiques (lecture, clics, factures payées après un WhatsApp).
+- Tableau de bord : santé, quotas, limites WhatsApp, liaison par QR code ou code à 8 caractères.
+- Onglets Messages (filtres, envoyer maintenant, annuler, réessayer), Désinscriptions, Astuces.
+- Widget du tableau de bord WHMCS, encart WhatsApp dans la fiche client.
+- Alerte e-mail aux administrateurs si WhatsApp reste déconnecté plus de 15 minutes.
+- Champs du profil client « Numéro WhatsApp » et « Pas de notifications WhatsApp ».
+- Bouton WhatsApp optionnel dans l'espace client.
+- Modèle « Avantages clients » qui suit l'e-mail promotionnel (désactivé par défaut).
+- Une passerelle déconnectée met la file en pause sans consommer de tentatives.
+- Migration automatique depuis `whatsapp_notify` (réglages, modèles, historique).
+- Tests automatiques et intégration continue GitHub Actions.
+
+**Passerelle**
+- Respect des limites renvoyées par WhatsApp (plafond de nouvelles discussions, restriction temporaire).
+- Plafond quotidien de nouveaux contacts, réduit pendant le rodage.
+- `getMessage` : les renvois demandés par le destinataire fonctionnent (fin des « En attente de ce message »).
+- Statuts de distribution / lecture (`POST /statuses`), désinscriptions (`GET/POST /optouts`).
+- Liaison par code (`POST /pair`), reconnexion (`POST /reconnect`).
+- Cache des vérifications de numéros, pas de synchronisation de l'historique, groupes et diffusions ignorés.
+- Reconnexion progressive, arrêt des tentatives répétées en cas de bannissement (403).
+- Verrou d'instance unique, arrêt propre, écritures disque groupées.
+
+## 2.0.0 — 2026-10-19
+- Notifications déclenchées par les e-mails WHMCS, liens de paiement FlexPay, PDF des factures,
+  remise pour paiement anticipé, messages commerciaux et amicaux, aperçu réel, redémarrage automatique.
+
+## 1.x — 2026-09 / 2026-10
+- Module `whatsapp_notify` : fournisseurs Sent.dm / Cloud API / HTTP, puis passerelle WhatsApp Web
+  auto-hébergée avec file d'attente, quotas, heures calmes et désinscription STOP.
