@@ -94,7 +94,7 @@ class Queue
     public static function enqueue(array $row)
     {
         $row += ['client_id' => 0, 'rel_type' => '', 'rel_id' => 0, 'attachment' => null, 'priority' => 5, 'source' => 'auto', 'status' => 'pending', 'error' => null];
-        $hash = sha1($row['event'] . '|' . $row['rel_type'] . '|' . $row['rel_id'] . '|' . $row['phone']);
+        $hash = self::hash($row['event'], $row['rel_type'], $row['rel_id'], $row['phone']);
         if ($row['source'] !== 'test' && $row['source'] !== 'manual') {
             $duplicate = Capsule::table(self::TABLE)->where('hash', $hash)->whereIn('status', ['pending', 'sending', 'sent'])
                 ->where('created_at', '>=', date('Y-m-d H:i:s', time() - 86400))->exists();
@@ -127,6 +127,12 @@ class Queue
             'created_at' => $now,
             'error' => $row['error'] === null ? null : Events::dbEncode($row['error']),
         ]);
+    }
+
+    /** Empreinte d'un message : même notification, même élément, même numéro. */
+    public static function hash($event, $relType, $relId, $phone)
+    {
+        return sha1($event . '|' . $relType . '|' . $relId . '|' . $phone);
     }
 
     /** Fusion des messages redondants. Retourne la raison d'ignorer le nouveau, ou null. */
@@ -238,8 +244,10 @@ class Queue
                     self::finish($row->id, 'skipped', 'Plus d\'actualité : ' . $reason);
                     return 'skip';
                 }
+                // Texte recomposé à l'envoi avec des liens suivis, que la notification soit
+                // automatique, manuelle ou un aperçu (les messages libres n'arrivent pas ici).
                 $tpl = self::template($row->event);
-                if ($tpl && $row->source !== 'manual') {
+                if ($tpl) {
                     $text = self::compose($tpl->message, $ctx['vars'], $def);
                     list(, $ordered) = Events::render($tpl->message, $ctx['vars']);
                     preg_match_all('/\{(\w+)\}/', $tpl->message, $m);
@@ -343,19 +351,83 @@ class Queue
         return null;
     }
 
-    /** Envoi immédiat d'un message libre (onglet Envoyer). */
-    public static function sendManual($clientId, $phone, $text, $attachInvoice = false)
+    /**
+     * Envoi immédiat d'un message libre (onglet Envoyer, boîte de réception).
+     *
+     * @param int $invoiceId facture jointe en PDF (0 = aucune), déjà contrôlée par l'appelant
+     */
+    public static function sendManual($clientId, $phone, $text, $invoiceId = 0)
     {
-        $attachment = null;
-        if ($clientId && $attachInvoice) {
-            $inv = Capsule::table('tblinvoices')->where('userid', $clientId)->where('status', 'Unpaid')->orderBy('id', 'desc')->value('id');
-            $attachment = $inv ? 'invoice:' . $inv : null;
-        }
         $id = self::enqueue([
             'client_id' => $clientId, 'event' => 'manual', 'phone' => $phone, 'message' => $text,
-            'attachment' => $attachment, 'priority' => 9, 'source' => 'manual',
+            'attachment' => $invoiceId ? 'invoice:' . (int) $invoiceId : null, 'priority' => 9, 'source' => 'manual',
         ]);
         return self::sendNow($id);
+    }
+
+    /**
+     * Envoi immédiat d'une notification à son client (page de la facture, onglet
+     * Envoyer) : même texte, mêmes liens suivis et même PDF qu'un envoi automatique,
+     * sans attendre le cron ni les heures calmes. Le consentement du client est
+     * respecté ; les quotas de la passerelle et le STOP s'appliquent comme toujours.
+     *
+     * @param string $phone    autre numéro que celui du client (facultatif)
+     * @param int    $clientId client attendu (0 = celui de l'élément)
+     * @return array ['ok', 'error', 'text', 'status', 'phone']
+     */
+    public static function sendNotification($event, $relId, $phone = '', $clientId = 0)
+    {
+        $fail = function ($error) use ($phone) {
+            return ['ok' => false, 'error' => $error, 'text' => '', 'status' => '', 'phone' => $phone];
+        };
+        $def = Events::get($event);
+        $tpl = self::template($event);
+        if (!$def || !$tpl || !empty($def['team'])) {
+            return $fail('Notification inconnue.');
+        }
+        $ctx = Context::build($def['rel'], $relId);
+        if (!$ctx['obj']) {
+            return $fail('Élément introuvable : vérifiez l\'ID saisi.');
+        }
+        if (!$ctx['client_id']) {
+            return $fail('Cet élément n\'est lié à aucun client.');
+        }
+        if ($clientId && (int) $clientId !== $ctx['client_id']) {
+            return $fail('Cet élément appartient au client #' . $ctx['client_id'] . ', pas au client #' . (int) $clientId . '.');
+        }
+        $reason = Context::irrelevant($event, $ctx);
+        if ($reason !== null) {
+            return $fail('Notification inadaptée : ' . $reason . '.');
+        }
+        $who = Phone::forClient($ctx['client']);
+        if ($who['blocked'] !== '' && $who['phone'] !== '') {
+            // STOP, refus coché dans le profil ou désinscription par un administrateur.
+            return $fail('Envoi impossible : ' . $who['blocked'] . '.');
+        }
+        if ($phone === '') {
+            $phone = $who['phone'];
+        } elseif (Phone::isOptedOut($phone)) {
+            return $fail('Envoi impossible : le +' . $phone . ' est désinscrit.');
+        }
+        if ($phone === '') {
+            return $fail('Envoi impossible : ' . ($who['blocked'] ?: 'aucun numéro de téléphone') . '.');
+        }
+        $hash = self::hash($event, $def['rel'], (int) $relId, $phone);
+        // Double clic ou formulaire renvoyé : pas de second envoi.
+        if (Capsule::table(self::TABLE)->where('hash', $hash)->where('source', 'manual')->whereIn('status', ['pending', 'sending', 'sent'])
+            ->where('created_at', '>=', date('Y-m-d H:i:s', time() - 120))->exists()) {
+            return $fail('Cette notification vient déjà d\'être envoyée (ou mise en file) pour ce numéro.');
+        }
+        // La même notification automatique encore en file ne partira pas en double.
+        Capsule::table(self::TABLE)->where('hash', $hash)->where('source', 'auto')->where('status', 'pending')
+            ->update(['status' => 'skipped', 'error' => 'Remplacé par un envoi manuel']);
+        $id = self::enqueue([
+            'client_id' => $ctx['client_id'], 'event' => $event, 'rel_type' => $def['rel'], 'rel_id' => (int) $relId,
+            'phone' => $phone, 'message' => self::compose($tpl->message, $ctx['vars'], $def),
+            'attachment' => ($def['rel'] === 'invoice' && $tpl->attach_pdf) ? 'invoice:' . (int) $relId : null,
+            'priority' => 9, 'source' => 'manual',
+        ]);
+        return self::sendNow($id) + ['phone' => $phone];
     }
 
     /** Aperçu réel d'une notification envoyé au numéro de l'administrateur. */

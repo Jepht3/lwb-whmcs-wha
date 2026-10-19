@@ -282,6 +282,27 @@ class Events
     }
 
     /**
+     * Notifications qu'un administrateur peut envoyer pour une facture (la première
+     * est proposée par défaut). Une facture échue reçoit les relances de retard
+     * plutôt que le rappel « arrive à échéance ».
+     */
+    public static function forInvoice($status, $daysLeft, $total)
+    {
+        if ((float) $total <= 0) {
+            return [];
+        }
+        if ($status === 'Paid') {
+            return ['invoice_paid'];
+        }
+        if ($status !== 'Unpaid') {
+            return [];
+        }
+        return (int) $daysLeft >= 0
+            ? ['invoice_created', 'invoice_reminder']
+            : ['invoice_created', 'invoice_overdue_1', 'invoice_overdue_2', 'invoice_overdue_3'];
+    }
+
+    /**
      * Remplace les {variables}. Gère le spintax {Bonjour|Salut|Hello} : une
      * variante est tirée au hasard pour que deux clients ne reçoivent pas
      * exactement le même texte. Les lignes vidées par une variable optionnelle

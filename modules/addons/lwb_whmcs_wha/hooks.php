@@ -7,7 +7,8 @@
  * - Alertes équipe : paiement, commande, ticket, réponse client, résiliation.
  * - Cron : maintien de la passerelle, synchronisations (désinscriptions, statuts,
  *   messages reçus des clients), alertes, envoi de la file.
- * - Administration : widget du tableau de bord, encart et lien dans la fiche client.
+ * - Administration : widget du tableau de bord, encart et lien dans la fiche client,
+ *   bouton « Envoyer sur WhatsApp » sur la page d'une facture.
  * - Espace client : bouton WhatsApp (optionnel).
  */
 
@@ -109,6 +110,14 @@ add_hook('AdminAreaClientSummaryActionLinks', 1, function ($vars) {
 add_hook('AdminAreaClientSummaryPage', 1, function ($vars) {
     try {
         return Admin::clientPanel((int) ($vars['userid'] ?? 0));
+    } catch (\Throwable $e) {
+        return '';
+    }
+});
+
+add_hook('AdminInvoicesControlsOutput', 1, function ($vars) {
+    try {
+        return Admin::invoicePanel((int) ($vars['invoiceid'] ?? 0));
     } catch (\Throwable $e) {
         return '';
     }

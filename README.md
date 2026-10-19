@@ -35,11 +35,13 @@ WHMCS (boîte de réception, tickets) ◄── cron ◄── passerelle Node.j
   `[Message vocal]`…) et le message cité est indiqué (« En réponse à : Rappel avant échéance »).
   En option (désactivée par défaut), les messages d'un client sont ajoutés à son ticket ouvert, ou lui ouvrent
   un ticket dans le département choisi.
+- **Envoi manuel** d'une notification précise, tout de suite : bouton **« Envoyer sur WhatsApp »** sur la
+  page d'une facture, ou onglet Envoyer (notification et élément au choix, ou message libre avec la facture
+  de votre choix en PDF). Voir [Envoyer une facture ou une notification à un client](#envoyer-une-facture-ou-une-notification-à-un-client).
 - **Suivi** : distribué / lu (✓✓), clics, statistiques, factures payées dans les 7 jours suivant un WhatsApp.
 - **Administration** : tableau de bord, liaison par QR code **ou par code à 8 caractères**, file
-  d'attente avec actions, aperçu réel sur votre numéro, envoi manuel avec facture PDF, widget du tableau
-  de bord WHMCS, encart dans la fiche client (derniers messages envoyés et reçus), alerte e-mail si WhatsApp
-  se déconnecte.
+  d'attente avec actions, aperçu réel sur votre numéro, widget du tableau de bord WHMCS, encart dans la
+  fiche client (derniers messages envoyés et reçus), alerte e-mail si WhatsApp se déconnecte.
 - **Consentement** : réponse STOP / START, champs du profil client « Numéro WhatsApp » et
   « Pas de notifications WhatsApp », liste des désinscriptions.
 - **Secours** : bascule possible vers WhatsApp Cloud API (officielle), Sent.dm ou une passerelle HTTP.
@@ -130,6 +132,37 @@ session : remplacez simplement `server.js`, `package.json` et `package-lock.json
 Principales variables : `{greeting}` (Bonjour/Bonsoir selon l'heure), `{first_name}`, `{invoice_id}`, `{total}`,
 `{balance}`, `{due_when}`, `{suspend_when}`, `{pay_link}`, `{early_discount}`, `{service}`, `{domain}`,
 `{renew_link}`, `{ticket_link}`, `{payment_methods}`, `{client_area}`. La liste complète s'affiche sous chaque modèle.
+
+## Envoyer une facture ou une notification à un client
+
+Les notifications automatiques suivent les e-mails WHMCS, avec leurs garde-fous (dédoublonnage sur 24 h,
+heures calmes, rappels limités à J-7 et J-1). Pour envoyer **tout de suite** une notification précise :
+
+- **Depuis une facture** (Facturation ▸ Factures ▸ une facture) : l'encart WhatsApp affiche le numéro du
+  client, les derniers envois pour cette facture et le bouton **« Envoyer sur WhatsApp »**. Il propose la
+  notification adaptée au statut de la facture :
+
+  | Facture | Notifications proposées |
+  |---|---|
+  | impayée, pas encore échue | Nouvelle facture (par défaut) · Rappel avant échéance |
+  | impayée et échue | Nouvelle facture (par défaut) · Facture en retard (J+1) · Facture en retard, relances suivantes · Dernier rappel avant suspension |
+  | payée | Paiement reçu |
+  | brouillon, annulée, remboursée, à 0 | aucune |
+
+  Le compte rendu (envoyé, en file d'attente ou refusé) s'affiche au retour sur la facture.
+- **Depuis l'onglet Envoyer** : choisissez le client, puis
+  - **Notification WHMCS** : le modèle et l'ID de l'élément (facture, service, domaine, commande, ticket,
+    ou client pour la bienvenue). Les éléments du client sont proposés dans le champ ;
+  - **Message libre** : votre texte, avec la facture de votre choix en PDF (les impayées en tête de liste).
+
+Une notification envoyée à la main a le même texte, les mêmes liens suivis et le même PDF que l'envoi
+automatique, avec les données à jour. Le numéro utilisé est le champ client « Numéro WhatsApp », sinon le
+téléphone du profil. L'envoi est refusé si le client s'est désinscrit (STOP, profil ou liste des
+désinscriptions) ou si la notification n'a plus lieu d'être (facture déjà payée…). Les quotas de la
+passerelle s'appliquent toujours : un message retenu par un quota reste en file et part à un passage suivant
+du cron, hors heures calmes.
+La même notification automatique encore en attente (même élément, même numéro) est annulée, et un double
+clic n'envoie rien de plus. Ces envois apparaissent dans l'onglet Messages avec l'étiquette « manuel ».
 
 ## Trucs et astuces
 

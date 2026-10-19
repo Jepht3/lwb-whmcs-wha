@@ -6,9 +6,11 @@
 define('WHMCS', true);
 require __DIR__ . '/../modules/addons/lwb_whmcs_wha/lib/bootstrap.php';
 
+use LwbWha\Admin;
 use LwbWha\Events;
 use LwbWha\Inbox;
 use LwbWha\Phone;
+use LwbWha\Queue;
 use LwbWha\Settings;
 use LwbWha\Time;
 
@@ -115,6 +117,36 @@ check('texte de ticket (plusieurs)', Inbox::ticketText([['text' => 'Bonjour', 't
     "[14:30] Bonjour\n\n[14:31] J'ai payé\n\n— Messages WhatsApp du +243816123456, le 19/10/2026.");
 $rows = [['id' => 1, 'client_id' => '5'], ['id' => 2, 'client_id' => '7'], ['id' => 3, 'client_id' => '5']];
 check('regroupement par client', Inbox::group($rows), [5 => [$rows[0], $rows[2]], 7 => [$rows[1]]]);
+
+// --- Envoi manuel d'une notification de facture
+check('facture impayée', Events::forInvoice('Unpaid', 5, '50.00'), ['invoice_created', 'invoice_reminder']);
+check('facture à échéance aujourd\'hui', Events::forInvoice('Unpaid', 0, 50), ['invoice_created', 'invoice_reminder']);
+check('facture échue : relances de retard', Events::forInvoice('Unpaid', -3, 50), ['invoice_created', 'invoice_overdue_1', 'invoice_overdue_2', 'invoice_overdue_3']);
+check('facture payée', Events::forInvoice('Paid', -10, '50.00'), ['invoice_paid']);
+check('facture impayée à 0', Events::forInvoice('Unpaid', 5, '0.00'), []);
+check('facture payée à 0', Events::forInvoice('Paid', 0, 0), []);
+foreach (['Draft', 'Cancelled', 'Refunded', 'Collections', 'Payment Pending'] as $status) {
+    check("facture $status : rien à envoyer", Events::forInvoice($status, 5, 50), []);
+}
+foreach ([['Unpaid', 5], ['Unpaid', -3], ['Paid', 0]] as list($status, $days)) {
+    foreach (Events::forInvoice($status, $days, 50) as $event) {
+        $def = Events::get($event);
+        check("$event : notification client d'une facture", $def && $def['rel'] === 'invoice' && empty($def['team']), true);
+    }
+}
+check('empreinte inchangée (doublons sur 24 h)', Queue::hash('invoice_created', 'invoice', 12, '243816123456'), sha1('invoice_created|invoice|12|243816123456'));
+check('empreinte : ID texte ou nombre', Queue::hash('invoice_paid', 'invoice', '12', '243816123456'), Queue::hash('invoice_paid', 'invoice', 12, '243816123456'));
+
+// --- Compte rendu d'un envoi manuel
+$html = Admin::sendResult(['ok' => true, 'phone' => '243816123456', 'text' => 'Bonjour <b>Awa</b>', 'status' => 'sent', 'error' => ''], 'Message envoyé');
+check('envoi réussi', strpos($html, 'successbox') !== false && strpos($html, 'Message envoyé au +243816123456.') !== false, true);
+check('texte envoyé échappé', strpos($html, 'Bonjour &lt;b&gt;Awa&lt;/b&gt;') !== false, true);
+$html = Admin::sendResult(['ok' => false, 'phone' => '243816123456', 'text' => '', 'status' => 'pending', 'error' => 'Quota anti-bannissement atteint'], 'Message envoyé');
+check('quota : reste en file', strpos($html, 'infobox') !== false && strpos($html, 'Quota anti-bannissement atteint') !== false, true);
+$html = Admin::sendResult(['ok' => false, 'phone' => '243816123456', 'text' => '', 'status' => 'failed', 'error' => "<n'a pas de compte>"], 'Message envoyé');
+check('échec signalé et échappé', strpos($html, 'errorbox') !== false && strpos($html, '&lt;n&#039;a pas de compte&gt;') !== false, true);
+check('refus avant envoi', strpos(Admin::sendResult(['ok' => false, 'error' => 'Élément introuvable'], 'Message envoyé'), 'errorbox') !== false, true);
+check('libellé échappé', strpos(Admin::sendResult(['ok' => true, 'phone' => '1', 'text' => ''], 'Notification « <x> » envoyée'), 'Notification « &lt;x&gt; » envoyée au +1.') !== false, true);
 
 echo $count - $failures . " / $count tests réussis\n";
 exit($failures ? 1 : 0);

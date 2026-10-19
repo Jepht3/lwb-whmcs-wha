@@ -13,6 +13,8 @@ class Admin
 {
     private static $link;
     private static $token;
+    /** Le dernier envoi manuel est parti (ou attend en file) : le formulaire est vidé. */
+    private static $done = false;
 
     const TABS = [
         'dashboard' => 'Tableau de bord',
@@ -30,6 +32,11 @@ class Admin
         'pending' => ['En attente', 'default'], 'sending' => ['Envoi…', 'info'], 'sent' => ['Envoyé', 'success'],
         'failed' => ['Échec', 'danger'], 'skipped' => ['Ignoré', 'warning'], 'expired' => ['Expiré', 'warning'],
         'optout' => ['Désinscrit', 'warning'],
+    ];
+
+    const INVOICE_STATUS = [
+        'Unpaid' => 'impayée', 'Paid' => 'payée', 'Cancelled' => 'annulée', 'Refunded' => 'remboursée',
+        'Draft' => 'en brouillon', 'Collections' => 'en recouvrement', 'Payment Pending' => 'en attente de paiement',
     ];
 
     private static function h($s)
@@ -63,6 +70,47 @@ class Admin
             return $def['label'];
         }
         return ['manual' => 'Message manuel'][$event] ?? $event;
+    }
+
+    /**
+     * Compte rendu d'un envoi immédiat. Refusé par les quotas de la passerelle ou
+     * pendant une déconnexion, le message reste en file et part plus tard.
+     *
+     * @param array  $res  résultat de Queue::sendNow, avec 'phone'
+     * @param string $done début de la phrase, ex. « Message envoyé »
+     */
+    public static function sendResult(array $res, $done)
+    {
+        if (!empty($res['ok'])) {
+            $text = (string) ($res['text'] ?? '');
+            return self::box('success', self::h($done) . (empty($res['phone']) ? '' : ' au +' . self::h($res['phone'])) . '.'
+                . ($text === '' ? '' : '<details style="margin-top:4px"><summary style="cursor:pointer">Texte envoyé</summary>'
+                    . '<pre style="white-space:pre-wrap;font-size:12px;margin:4px 0 0">' . self::h($text) . '</pre></details>'));
+        }
+        if (in_array($res['status'] ?? '', ['pending', 'sending'], true)) {
+            return self::box('info', 'Pas encore envoyé : ' . self::h($res['error'] ?? '') . '<br>Le message reste dans la file d\'attente et partira '
+                . 'automatiquement au prochain passage du cron, hors heures calmes (onglet Messages pour l\'annuler).');
+        }
+        return self::box('error', 'Échec : ' . self::h($res['error'] ?? ''));
+    }
+
+    /** Compte rendu d'un envoi manuel ; une réponse partie traite les messages reçus de ce numéro. */
+    private static function sent(array $res, $done)
+    {
+        self::$done = !empty($res['ok']) || in_array($res['status'] ?? '', ['pending', 'sending'], true);
+        if (!empty($res['ok']) && !empty($res['phone'])) {
+            Inbox::markReplied($res['phone']);
+        }
+        return self::sendResult($res, $done);
+    }
+
+    /** Libellé d'une facture dans les listes : numéro, montant, statut, échéance. */
+    private static function invoiceLabel($inv)
+    {
+        $num = (string) $inv->invoicenum;
+        $num = $num !== '' && $num !== (string) $inv->id ? $num . ' (ID ' . $inv->id . ')' : (string) $inv->id;
+        return 'n°' . $num . ' · ' . Context::money($inv->total, $inv->userid) . ' · ' . (self::INVOICE_STATUS[$inv->status] ?? $inv->status)
+            . ' · échéance ' . Time::date($inv->duedate);
     }
 
     public static function render(array $vars)
@@ -117,16 +165,36 @@ class Admin
 
             case 'send_manual':
                 $clientId = (int) ($_POST['client_id'] ?? 0);
-                $text = trim((string) ($_POST['message'] ?? ''));
                 $phone = Phone::normalize((string) ($_POST['phone'] ?? ''));
+                $client = $clientId ? Capsule::table('tblclients')->where('id', $clientId)->first() : null;
+                if ($clientId && !$client) {
+                    return self::box('error', 'Client #' . $clientId . ' introuvable.');
+                }
+                if (($_POST['mode'] ?? '') === 'event') {
+                    $event = (string) ($_POST['event'] ?? '');
+                    $def = Events::get($event);
+                    $relId = (int) ($_POST['relid'] ?? 0);
+                    if ($def && $def['rel'] === 'client' && !$relId) {
+                        $relId = $clientId;
+                    }
+                    if (!$relId) {
+                        return self::box('error', 'Indiquez l\'ID de l\'élément (facture, service, domaine…).');
+                    }
+                    $res = Queue::sendNotification($event, $relId, $phone, $clientId);
+                    return self::sent($res, 'Notification « ' . ($def ? $def['label'] : $event) . ' » envoyée');
+                }
+                $text = trim((string) ($_POST['message'] ?? ''));
+                $invoiceId = (int) ($_POST['invoice_id'] ?? 0);
                 if ($text === '') {
                     return self::box('error', 'Le message est vide.');
                 }
-                if ($clientId) {
-                    $client = Capsule::table('tblclients')->where('id', $clientId)->first();
-                    if (!$client) {
-                        return self::box('error', 'Client #' . $clientId . ' introuvable.');
-                    }
+                if ($invoiceId && !$client) {
+                    return self::box('error', 'Choisissez le client pour joindre une de ses factures.');
+                }
+                if ($invoiceId && !Capsule::table('tblinvoices')->where('id', $invoiceId)->where('userid', $clientId)->exists()) {
+                    return self::box('error', 'La facture #' . $invoiceId . ' n\'appartient pas à ce client.');
+                }
+                if ($client) {
                     if ($phone === '') {
                         $who = Phone::forClient($client);
                         if ($who['blocked'] !== '' && $who['phone'] === '') {
@@ -140,12 +208,20 @@ class Admin
                 if ($phone === '') {
                     return self::box('error', 'Aucun numéro de téléphone.');
                 }
-                $res = Queue::sendManual($clientId, $phone, $text, !empty($_POST['attach_invoice']));
-                if ($res['ok']) {
-                    Inbox::markReplied($phone);
+                $res = Queue::sendManual($clientId, $phone, $text, $invoiceId);
+                return self::sent($res + ['phone' => $phone], 'Message envoyé');
+
+            case 'send_invoice':
+                // Bouton de la page d'une facture : le compte rendu s'affiche au retour sur la facture.
+                $invoiceId = (int) ($_POST['invoice_id'] ?? 0);
+                $flash = self::sendInvoice($invoiceId, (string) ($_POST['event'] ?? ''));
+                $back = 'invoices.php?action=edit&id=' . $invoiceId;
+                if ($invoiceId && !headers_sent()) {
+                    $_SESSION['lwbwha_flash'] = ['invoice' => $invoiceId, 'html' => $flash];
+                    header('Location: ' . $back);
+                    exit;
                 }
-                return $res['ok'] ? self::box('success', 'Message envoyé au +' . self::h($phone) . '.')
-                    : self::box('error', 'Échec : ' . self::h($res['error']));
+                return $flash . '<p><a href="' . self::h($back) . '">&larr; Retour à la facture</a></p>';
 
             case 'inbox_reply':
                 $row = Inbox::ready() ? Capsule::table(Inbox::TABLE)->where('id', $id)->first() : null;
@@ -226,6 +302,20 @@ class Admin
                 return self::box('success', '+' . self::h($phone) . ' peut de nouveau recevoir des messages.');
         }
         return '';
+    }
+
+    /** Notification choisie sur la page d'une facture, contrôlée d'après l'état actuel de la facture. */
+    private static function sendInvoice($invoiceId, $event)
+    {
+        $inv = Capsule::table('tblinvoices')->where('id', (int) $invoiceId)->first();
+        if (!$inv) {
+            return self::box('error', 'Facture #' . (int) $invoiceId . ' introuvable.');
+        }
+        if (!in_array($event, Events::forInvoice($inv->status, Time::daysUntil($inv->duedate), $inv->total), true)) {
+            return self::box('error', 'Cette notification ne correspond pas à une facture ' . self::h(self::INVOICE_STATUS[$inv->status] ?? $inv->status) . ' : rechargez la page.');
+        }
+        $res = Queue::sendNotification($event, (int) $inv->id);
+        return self::sent($res, 'Notification « ' . Events::get($event)['label'] . ' » envoyée');
     }
 
     // ------------------------------------------------------------------ pages
@@ -447,27 +537,118 @@ class Admin
     private static function pageSend()
     {
         $clientId = (int) ($_GET['userid'] ?? $_POST['client_id'] ?? 0);
-        $info = '';
-        if ($clientId) {
-            $client = Capsule::table('tblclients')->where('id', $clientId)->first();
-            if ($client) {
-                $who = Phone::forClient($client);
-                $info = '<p>Client : <strong>' . self::h(trim($client->firstname . ' ' . $client->lastname)) . '</strong> · '
-                    . ($who['phone'] !== '' ? 'WhatsApp : +' . self::h($who['phone']) : '<span class="text-danger">aucun numéro</span>')
-                    . ($who['blocked'] !== '' && $who['phone'] !== '' ? ' · <span class="text-warning">' . self::h($who['blocked']) . '</span>' : '') . '</p>';
-            }
+        $client = $clientId ? Capsule::table('tblclients')->where('id', $clientId)->first() : null;
+        // Après un refus, la saisie est conservée ; après un envoi, seuls le mode et la notification restent.
+        $old = ($_POST['action'] ?? '') === 'send_manual' && !self::$done ? $_POST : [];
+        $mode = ($_POST['mode'] ?? '') === 'event' ? 'event' : 'text';
+        $event = (string) ($_POST['event'] ?? '');
+
+        $info = '<span class="text-muted">ou laissez vide pour écrire à un numéro</span>';
+        if ($client) {
+            $who = Phone::forClient($client);
+            $info = '<strong>' . self::h(trim($client->firstname . ' ' . $client->lastname)) . '</strong> · '
+                . ($who['phone'] !== '' ? 'WhatsApp : +' . self::h($who['phone']) : '<span class="text-danger">aucun numéro</span>')
+                . ($who['blocked'] !== '' && $who['phone'] !== '' ? ' · <span class="text-warning">' . self::h($who['blocked']) . '</span>' : '');
+        } elseif ($clientId) {
+            $info = '<span class="text-danger">Client #' . $clientId . ' introuvable</span>';
         }
-        echo '<div class="lwb-card">' . $info
-            . self::form('send_manual', 'send',
-                '<p>ID client : <input type="number" name="client_id" value="' . ($clientId ?: '') . '" class="form-control" style="width:140px;display:inline-block">'
-                . ' &nbsp;ou numéro : <input type="text" name="phone" placeholder="+243…" class="form-control" style="width:200px;display:inline-block"></p>'
-                . '<p><textarea name="message" rows="6" class="form-control" placeholder="{greeting} {first_name}, …"></textarea>'
-                . '<small>Avec un ID client : ' . implode(' ', array_map(function ($v) {
+        echo '<div class="lwb-card"><form method="get" class="form-inline" style="margin:0"><input type="hidden" name="module" value="' . Settings::MODULE . '">'
+            . '<input type="hidden" name="tab" value="send">Client : <input type="number" name="userid" value="' . ($clientId ?: '') . '" placeholder="ID client" class="form-control" style="width:120px"> '
+            . '<button class="btn btn-default">Choisir</button> &nbsp;' . $info . '</form></div>';
+        $clientId = $client ? (int) $client->id : 0;
+
+        // Notifications client, par rubrique ; data-rel oriente les suggestions d'ID.
+        $events = '';
+        $group = null;
+        foreach (Events::defaults() as $key => $def) {
+            if (!empty($def['team'])) {
+                continue;
+            }
+            if ($def['group'] !== $group) {
+                $events .= ($group === null ? '' : '</optgroup>') . '<optgroup label="' . self::h($def['group']) . '">';
+                $group = $def['group'];
+            }
+            $events .= '<option value="' . $key . '" data-rel="' . $def['rel'] . '"' . ($event === $key ? ' selected' : '') . '>' . self::h($def['label']) . '</option>';
+        }
+        $events .= '</optgroup>';
+
+        $attach = '<p class="text-muted"><small>Choisissez un client pour joindre une de ses factures en PDF.</small></p>';
+        $lists = '';
+        if ($clientId) {
+            $invoices = Capsule::table('tblinvoices')->where('userid', $clientId)->where('status', '!=', 'Draft')
+                ->orderByRaw("status = 'Unpaid' desc")->orderBy('id', 'desc')->limit(15)->get(['id', 'userid', 'invoicenum', 'total', 'status', 'duedate']);
+            $options = '<option value="">Aucune</option>';
+            foreach ($invoices as $inv) {
+                $options .= '<option value="' . (int) $inv->id . '"' . ((int) ($old['invoice_id'] ?? 0) === (int) $inv->id ? ' selected' : '') . '>' . self::h(self::invoiceLabel($inv)) . '</option>';
+            }
+            $attach = '<p>Joindre une facture (PDF) : <select name="invoice_id" class="form-control" style="display:inline-block;width:auto;max-width:100%">' . $options . '</select></p>';
+            $lists = self::suggestions($clientId, $invoices);
+        }
+
+        $quiet = Time::inQuietHours() ? 'onsubmit="return confirm(\'Heures calmes en cours chez vos clients : envoyer quand même maintenant ?\')"' : '';
+        echo '<div class="lwb-card">'
+            . self::form('send_manual', array_filter(['tab' => 'send', 'userid' => $clientId ?: null]),
+                '<input type="hidden" name="client_id" value="' . ($clientId ?: '') . '">'
+                . '<p><label style="font-weight:normal;margin-right:18px"><input type="radio" name="mode" value="text"' . ($mode === 'text' ? ' checked' : '') . '> Message libre</label>'
+                . '<label style="font-weight:normal"><input type="radio" name="mode" value="event"' . ($mode === 'event' ? ' checked' : '') . '> Notification WHMCS (facture, service, domaine…)</label></p>'
+                . '<div id="lwb-send-text"><p><textarea name="message" rows="6" class="form-control" placeholder="{greeting} {first_name}, …">' . self::h($old['message'] ?? '') . '</textarea>'
+                . '<small>Avec un client : ' . implode(' ', array_map(function ($v) {
                     return '<span class="lwb-var">{' . $v . '}</span>';
-                }, ['greeting', 'first_name', 'client_name', 'company', 'client_area'])) . ' et les variantes {Bonjour|Hello}.</small></p>'
-                . '<p><label><input type="checkbox" name="attach_invoice" value="1"> Joindre la dernière facture impayée du client (PDF)</label></p>'
-                . '<button class="btn btn-primary">Envoyer maintenant</button>')
-            . '</div><p class="text-muted">Les messages manuels partent tout de suite (hors file d\'attente) mais respectent les quotas anti-bannissement de la passerelle.</p>';
+                }, ['greeting', 'first_name', 'client_name', 'company', 'client_area'])) . ' et les variantes {Bonjour|Hello}.</small></p>' . $attach . '</div>'
+                . '<div id="lwb-send-event"><p>Notification : <select name="event" class="form-control" style="display:inline-block;width:auto;max-width:100%">' . $events . '</select></p>'
+                . '<p>ID de l\'élément : <input type="number" name="relid" value="' . ((int) ($old['relid'] ?? 0) ?: '') . '" class="form-control" style="width:140px;display:inline-block" autocomplete="off"> '
+                . '<small class="text-muted">' . ($clientId ? 'les éléments du client sont proposés · ' : '') . 'facture → ID facture · service → ID service · domaine → ID domaine · '
+                . 'bienvenue/marketing → ID client · commande → ID commande · ticket → ID ticket</small></p>'
+                . '<p class="text-muted"><small>Même texte, mêmes liens et même PDF que la notification automatique (onglet Modèles), avec les données à jour, '
+                . 'vers le client de l\'élément. Refusée si la situation ne s\'y prête plus (facture déjà payée…) ou si le client s\'est désinscrit.</small></p></div>'
+                . '<p>Numéro : <input type="text" name="phone" value="' . self::h($old['phone'] ?? '') . '" placeholder="+243…" class="form-control" style="width:200px;display:inline-block"> '
+                . '<small class="text-muted">facultatif pour un client : son numéro WhatsApp est utilisé</small></p>'
+                . '<button class="btn btn-primary">Envoyer maintenant</button>' . $lists,
+                'id="lwb-send" ' . $quiet)
+            . '</div><p class="text-muted">Les envois manuels partent tout de suite (sans attendre le cron ni la fin des heures calmes), mais respectent les quotas anti-bannissement de la passerelle et le STOP. '
+            . 'Pour une facture, le bouton « Envoyer sur WhatsApp » de sa page fait la même chose en un clic.</p>'
+            . '<script>(function () {'
+            . 'var f = document.getElementById("lwb-send"), e = f.elements["event"], r = f.elements["relid"];'
+            . 'function show() {'
+            . 'var ev = f.querySelector("input[name=mode]:checked").value === "event", o = e.options[e.selectedIndex], rel = o ? o.getAttribute("data-rel") : "";'
+            . 'document.getElementById("lwb-send-text").style.display = ev ? "none" : "";'
+            . 'document.getElementById("lwb-send-event").style.display = ev ? "" : "none";'
+            . 'r.setAttribute("list", "lwb-rel-" + rel);'
+            . 'if (ev && rel === "client" && !r.value && f.elements["client_id"].value) { r.value = f.elements["client_id"].value; } }'
+            . 'f.addEventListener("change", show); show(); })();</script>';
+    }
+
+    /** Éléments d'un client proposés dans le champ « ID de l'élément », par type d'objet. */
+    private static function suggestions($clientId, $invoices)
+    {
+        $lists = ['invoice' => [], 'service' => [], 'domain' => [], 'client' => [$clientId => 'ce client'], 'order' => [], 'ticket' => []];
+        foreach ($invoices as $inv) {
+            $lists['invoice'][$inv->id] = self::invoiceLabel($inv);
+        }
+        $services = Capsule::table('tblhosting as h')->leftJoin('tblproducts as p', 'p.id', '=', 'h.packageid')->where('h.userid', $clientId)
+            ->orderBy('h.id', 'desc')->limit(20)->get(['h.id', 'h.domain', 'h.domainstatus', 'p.name']);
+        foreach ($services as $s) {
+            $lists['service'][$s->id] = trim($s->name . ' ' . $s->domain) . ' · ' . $s->domainstatus;
+        }
+        foreach (Capsule::table('tbldomains')->where('userid', $clientId)->orderBy('id', 'desc')->limit(20)->get(['id', 'domain', 'status', 'expirydate']) as $d) {
+            $expiry = Time::date($d->expirydate);
+            $lists['domain'][$d->id] = $d->domain . ' · ' . $d->status . ($expiry !== '' ? ' · expire le ' . $expiry : '');
+        }
+        foreach (Capsule::table('tblorders')->where('userid', $clientId)->orderBy('id', 'desc')->limit(10)->get(['id', 'ordernum', 'date', 'status']) as $o) {
+            $lists['order'][$o->id] = 'n°' . $o->ordernum . ' du ' . Time::date($o->date) . ' · ' . $o->status;
+        }
+        foreach (Capsule::table('tbltickets')->where('userid', $clientId)->orderBy('id', 'desc')->limit(10)->get(['id', 'tid', 'title', 'status']) as $t) {
+            $lists['ticket'][$t->id] = '#' . $t->tid . ' ' . $t->title . ' · ' . $t->status;
+        }
+        $html = '';
+        foreach ($lists as $rel => $items) {
+            $html .= '<datalist id="lwb-rel-' . $rel . '">';
+            foreach ($items as $id => $label) {
+                $html .= '<option value="' . (int) $id . '">' . self::h($label) . '</option>';
+            }
+            $html .= '</datalist>';
+        }
+        return $html;
     }
 
     private static function pageTemplates()
@@ -578,6 +759,7 @@ class Admin
             echo '<tr><td>' . $r->id . '</td><td>' . self::h(Time::show($when)) . ($r->status === 'pending' ? '<br><small class="text-muted">prévu</small>' : '') . '</td>'
                 . '<td>' . ($client ? '<a href="clientssummary.php?userid=' . (int) $r->client_id . '">' . self::h(trim($client->firstname . ' ' . $client->lastname)) . '</a>' : ($r->source === 'team' ? 'Équipe' : '–')) . '</td>'
                 . '<td>' . self::h(self::label($r->event)) . ($r->source === 'test' ? ' <span class="label label-info">aperçu</span>' : '') . ($r->source === 'team' ? ' <span class="label label-default">équipe</span>' : '')
+                . ($r->source === 'manual' && $r->event !== 'manual' ? ' <span class="label label-primary">manuel</span>' : '')
                 . '<details><summary class="text-muted" style="cursor:pointer;font-size:11px">voir le texte</summary><pre class="lwb-msg">' . self::h(Events::dbDecode($r->message)) . '</pre></details></td>'
                 . '<td>+' . self::h($r->phone) . '</td>'
                 . '<td><span class="label label-' . $lbl[1] . '">' . $lbl[0] . '</span>' . ($r->error ? '<br><small class="text-muted">' . self::h(mb_substr(Events::dbDecode($r->error), 0, 140)) . '</small>' : '') . '</td>'
@@ -741,6 +923,75 @@ class Admin
                     . ($r->ticket_id ? ' <a href="supporttickets.php?action=view&id=' . (int) $r->ticket_id . '">ticket</a>' : '') . '</td></tr>';
             }
             $html .= '</table>';
+        }
+        return $html . '</div>';
+    }
+
+    /**
+     * Encart WhatsApp de la page d'une facture : envoie tout de suite au client la
+     * notification adaptée au statut de la facture. La page place cet encart dans un
+     * formulaire : le bouton construit donc son propre formulaire, vers le module.
+     */
+    public static function invoicePanel($invoiceId)
+    {
+        $inv = Capsule::table('tblinvoices')->where('id', (int) $invoiceId)->first();
+        if (!$inv) {
+            return '';
+        }
+        $flash = '';
+        if ((int) ($_SESSION['lwbwha_flash']['invoice'] ?? 0) === (int) $inv->id) {
+            $flash = (string) $_SESSION['lwbwha_flash']['html'];
+            unset($_SESSION['lwbwha_flash']);
+        }
+        $who = Phone::forClient((int) $inv->userid);
+        $choices = Events::forInvoice($inv->status, Time::daysUntil($inv->duedate), $inv->total);
+        $base = 'addonmodules.php?module=' . Settings::MODULE;
+        $html = $flash . '<div style="margin:10px 0;padding:8px 10px;border:1px solid #cfe3d4;border-radius:4px;background:#f6fbf7;text-align:left">'
+            . '<strong><i class="fab fa-whatsapp" style="color:#25D366"></i> WhatsApp</strong> · '
+            . ($who['phone'] !== '' ? '+' . self::h($who['phone']) : '<span class="text-danger">aucun numéro</span>')
+            . ($who['blocked'] !== '' && $who['phone'] !== '' ? ' · <span class="text-warning">' . self::h($who['blocked']) . '</span>' : '')
+            . ' · <a href="' . $base . '&tab=messages&q=' . (int) $inv->userid . '">Historique</a>';
+        if (!$choices) {
+            $html .= '<div class="text-muted" style="margin-top:4px"><small>Rien à envoyer pour une facture '
+                . ((float) $inv->total <= 0 ? 'à 0' : self::h(self::INVOICE_STATUS[$inv->status] ?? $inv->status)) . '.</small></div>';
+        } elseif ($who['phone'] !== '' && $who['blocked'] === '') {
+            if (count($choices) > 1) {
+                $pick = '<select class="form-control input-sm" style="display:inline-block;width:auto;max-width:100%;margin-right:4px">';
+                foreach ($choices as $event) {
+                    $pick .= '<option value="' . $event . '">' . self::h(Events::get($event)['label']) . '</option>';
+                }
+                $pick .= '</select>';
+            } else {
+                $pick = '<span style="margin-right:6px">' . self::h(Events::get($choices[0])['label']) . '</span>';
+            }
+            $quiet = Time::inQuietHours() ? 'Heures calmes en cours chez vos clients : le message part quand même tout de suite.' : '';
+            $html .= '<div style="margin-top:6px">' . $pick
+                . '<button type="button" class="btn btn-success btn-sm" onclick="lwbWhaInvoice(this)" data-url="' . self::h($base . '&tab=send') . '"'
+                . ' data-token="' . self::h(generate_token('plain')) . '" data-invoice="' . (int) $inv->id . '" data-event="' . $choices[0] . '"'
+                . ' data-label="' . self::h(Events::get($choices[0])['label']) . '" data-phone="' . self::h($who['phone']) . '" data-quiet="' . self::h($quiet) . '">'
+                . '<i class="fab fa-whatsapp"></i> Envoyer sur WhatsApp</button></div>'
+                . '<script>function lwbWhaInvoice(b) {'
+                . 'var s = b.parentNode.querySelector("select"), o = s ? s.options[s.selectedIndex] : null, q = b.getAttribute("data-quiet");'
+                . 'if (!confirm("Envoyer « " + (o ? o.text : b.getAttribute("data-label")) + " » sur WhatsApp au +" + b.getAttribute("data-phone")'
+                . ' + " maintenant ?" + (q ? "\n\n" + q : ""))) { return; }'
+                . 'b.disabled = true;'
+                . 'var f = document.createElement("form"), d = {token: b.getAttribute("data-token"), action: "send_invoice",'
+                . ' invoice_id: b.getAttribute("data-invoice"), event: o ? o.value : b.getAttribute("data-event")};'
+                . 'f.method = "post"; f.setAttribute("action", b.getAttribute("data-url"));'
+                . 'for (var k in d) { var i = document.createElement("input"); i.type = "hidden"; i.name = k; i.value = d[k]; f.appendChild(i); }'
+                . 'document.body.appendChild(f); f.submit(); }</script>';
+        }
+        $rows = Capsule::table(Queue::TABLE)->where('rel_type', 'invoice')->where('rel_id', $inv->id)->whereIn('source', ['auto', 'manual'])
+            ->orderBy('id', 'desc')->limit(3)->get();
+        if (count($rows)) {
+            $html .= '<div class="text-muted" style="margin-top:6px;font-size:11px">';
+            foreach ($rows as $r) {
+                $lbl = self::STATUS_LABELS[$r->status] ?? [$r->status, 'default'];
+                $html .= self::h(Time::show($r->sent_at ?: $r->created_at, 'd/m H:i')) . ' · ' . self::h(self::label($r->event)) . ' · ' . $lbl[0]
+                    . ($r->delivery === 'read' ? ' <span style="color:#34B7F1;font-weight:bold">✓✓ lu</span>' : ($r->delivery === 'delivered' ? ' ✓✓' : ''))
+                    . ($r->source === 'manual' ? ' (manuel)' : '') . '<br>';
+            }
+            $html .= '</div>';
         }
         return $html . '</div>';
     }

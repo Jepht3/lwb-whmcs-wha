@@ -1,5 +1,25 @@
 # Journal des versions
 
+## 3.2.0 — 2026-10-19
+
+Envoyer à un client une facture ou une notification précise, sans renvoyer l'e-mail WHMCS.
+
+**Module WHMCS** (passerelle inchangée)
+- Page d'une facture : encart WhatsApp avec le numéro du client, les derniers envois pour la facture et le
+  bouton **« Envoyer sur WhatsApp »**. Il envoie tout de suite la notification adaptée au statut : impayée,
+  « Nouvelle facture » ou « Rappel avant échéance » au choix (relances de retard si la facture est échue) ;
+  payée, « Paiement reçu ». Compte rendu affiché au retour sur la facture.
+- Onglet **Envoyer** : choix du client, puis **notification WHMCS** (modèle et ID de l'élément, avec les
+  éléments du client proposés) ou **message libre** avec la **facture de votre choix** en PDF (remplace « la
+  dernière impayée »). La saisie est conservée après un refus. Confirmation demandée pendant les heures calmes.
+- Une notification envoyée à la main reprend le texte, les liens suivis et le PDF de l'envoi automatique,
+  avec les données à jour. Elle est refusée si le client s'est désinscrit (STOP, profil, liste des
+  désinscriptions), si l'élément appartient à un autre client ou si elle n'a plus lieu d'être. Elle annule la
+  même notification automatique encore en attente, et un double clic ne la renvoie pas.
+- Compte rendu exact des envois manuels : un message retenu par un quota de la passerelle ou une déconnexion
+  est signalé « en file d'attente » (il part au cron suivant) au lieu de « Échec ».
+- Onglet Messages : étiquette « manuel » sur les notifications envoyées à la main.
+
 ## 3.1.0 — 2026-10-19
 
 Les réponses des clients ne restent plus sur le téléphone : elles arrivent dans WHMCS.
