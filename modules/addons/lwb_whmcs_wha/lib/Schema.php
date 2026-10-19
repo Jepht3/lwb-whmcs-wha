@@ -80,6 +80,22 @@ class Schema
                 $t->dateTime('updated_at')->nullable();
             });
         }
+        if (!$schema->hasTable(Inbox::TABLE)) {
+            $schema->create(Inbox::TABLE, function ($t) {
+                $t->increments('id');
+                $t->string('wa_id', 64)->unique();
+                $t->integer('client_id')->default(0)->index();
+                $t->string('phone', 30)->index();
+                // Nom WhatsApp de l'expéditeur (25 caractères, emojis encodés).
+                $t->string('name', 255)->default('');
+                $t->text('message');
+                // Message de la file auquel le client répond (citation), ticket WHMCS associé.
+                $t->integer('reply_to')->default(0);
+                $t->integer('ticket_id')->default(0);
+                $t->dateTime('received_at')->index();
+                $t->dateTime('replied_at')->nullable();
+            });
+        }
 
         self::seedTemplates();
         self::customFields();

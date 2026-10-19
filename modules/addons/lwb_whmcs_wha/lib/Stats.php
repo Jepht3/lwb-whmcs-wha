@@ -87,6 +87,7 @@ class Stats
             'failed_today' => Capsule::table(Queue::TABLE)->where('status', 'failed')->where('created_at', '>=', $dayStart)->count(),
             'read_rate' => $sent7 ? round($read7 * 100 / $sent7) : null,
             'next' => Capsule::table(Queue::TABLE)->where('status', 'pending')->min('next_try'),
+            'received_today' => Inbox::ready() ? Capsule::table(Inbox::TABLE)->where('received_at', '>=', $dayStart)->count() : 0,
         ];
     }
 }

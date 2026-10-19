@@ -8,6 +8,7 @@ comme **WhatsApp Web** (appareil lié).
 
 ```
 WHMCS (e-mails, cron) ──► file d'attente anti-ban ──► passerelle Node.js ──► WhatsApp ──► client
+WHMCS (boîte de réception, tickets) ◄── cron ◄── passerelle Node.js ◄── WhatsApp ◄── client
 ```
 
 > ⚠️ Automatiser WhatsApp Web n'est pas autorisé par les conditions d'utilisation de WhatsApp. Le module
@@ -28,10 +29,17 @@ WHMCS (e-mails, cron) ──► file d'attente anti-ban ──► passerelle Nod
 - **Fusion intelligente** : à la commande, un seul message (commande + paiement + bienvenue) au lieu de trois.
 - **Alertes équipe** sur WhatsApp : paiement reçu, nouvelle commande, nouveau ticket, réponse d'un client,
   demande de résiliation.
+- **Boîte de réception** : les messages WhatsApp de vos clients arrivent dans WHMCS, rattachés à la fiche
+  client par le numéro. L'onglet permet de filtrer par client, nom ou numéro et de **répondre directement**,
+  via la file d'envoi et ses protections anti-bannissement. Les médias sont signalés (`[Photo] légende`,
+  `[Message vocal]`…) et le message cité est indiqué (« En réponse à : Rappel avant échéance »).
+  En option (désactivée par défaut), les messages d'un client sont ajoutés à son ticket ouvert, ou lui ouvrent
+  un ticket dans le département choisi.
 - **Suivi** : distribué / lu (✓✓), clics, statistiques, factures payées dans les 7 jours suivant un WhatsApp.
 - **Administration** : tableau de bord, liaison par QR code **ou par code à 8 caractères**, file
   d'attente avec actions, aperçu réel sur votre numéro, envoi manuel avec facture PDF, widget du tableau
-  de bord WHMCS, encart dans la fiche client, alerte e-mail si WhatsApp se déconnecte.
+  de bord WHMCS, encart dans la fiche client (derniers messages envoyés et reçus), alerte e-mail si WhatsApp
+  se déconnecte.
 - **Consentement** : réponse STOP / START, champs du profil client « Numéro WhatsApp » et
   « Pas de notifications WhatsApp », liste des désinscriptions.
 - **Secours** : bascule possible vers WhatsApp Cloud API (officielle), Sent.dm ou une passerelle HTTP.
@@ -88,6 +96,13 @@ Démarrez la passerelle :
    demandez un code de liaison si WHMCS est ouvert sur le même téléphone.
 4. Onglet **Aperçu** : envoyez-vous une notification réelle (ex. une facture) pour vérifier le rendu.
 
+### Mise à jour d'une version 3.x
+1. Remplacez le dossier `modules/addons/lwb_whmcs_wha/` de WHMCS. Les nouvelles tables sont créées
+   automatiquement (au prochain cron ou à l'ouverture du module).
+2. Dans le dossier de la passerelle, remplacez `server.js`, `package.json` et `package-lock.json` (puis
+   `npm ci --omit=dev` si le journal des versions indique de nouvelles dépendances), et redémarrez-la
+   (`pm2 restart`, ou arrêtez le processus : le cron WHMCS la relance). La session WhatsApp est conservée.
+
 ### Mise à jour depuis `whatsapp_notify`
 Activez `lwb_whmcs_wha` : il reprend les réglages, l'état des modèles et l'historique de l'ancien module.
 Désactivez ensuite **WhatsApp Notify** (le tableau de bord vous le rappelle). La passerelle garde sa
@@ -135,10 +150,15 @@ L'onglet **Astuces** du module en donne la liste complète. Les plus importantes
 | « Plus d'actualité » | Normal : la situation a changé avant l'envoi (facture payée…) |
 | « n'a pas de compte WhatsApp » | Corrigez le numéro du client ou renseignez son champ « Numéro WhatsApp » |
 | Statut « Refusé (403) » | Le numéro est peut-être banni : vérifiez le téléphone, reliez un numéro de secours |
+| Boîte de réception vide | Passerelle 3.1.0 ou plus requise (l'onglet le signale) ; les messages arrivent au cron suivant ou à l'ouverture de l'onglet |
+| Message reçu « Numéro inconnu » | Le numéro ne correspond à aucun client : renseignez le téléphone ou le champ « Numéro WhatsApp » du client |
 
 ## Sécurité
 - La passerelle écoute sur `127.0.0.1` par défaut et chaque appel exige la clé API.
 - `gateway/data/` contient la session WhatsApp : protégez-le et sauvegardez-le (sinon, nouveau QR code).
+- Les messages reçus restent 30 jours dans `gateway/data/inbox.json` (2 000 au plus), puis dans WHMCS selon
+  la durée de conservation de l'historique. Dans un ticket, les chevrons sont neutralisés et les emojis
+  retirés (base utf8) ; le message complet reste dans la boîte de réception.
 - Les liens courts sont aléatoires et ne redirigent que vers votre WHMCS.
 
 ## Développement

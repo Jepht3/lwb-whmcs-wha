@@ -5,7 +5,8 @@
  * - Notifications client : suivent les e-mails envoyés par WHMCS (EmailPreSend),
  *   y compris ceux de vos propres hooks (SendEmail).
  * - Alertes équipe : paiement, commande, ticket, réponse client, résiliation.
- * - Cron : maintien de la passerelle, synchronisations, alertes, envoi de la file.
+ * - Cron : maintien de la passerelle, synchronisations (désinscriptions, statuts,
+ *   messages reçus des clients), alertes, envoi de la file.
  * - Administration : widget du tableau de bord, encart et lien dans la fiche client.
  * - Espace client : bouton WhatsApp (optionnel).
  */
@@ -20,6 +21,7 @@ use LwbWha\Admin;
 use LwbWha\Alerts;
 use LwbWha\Events;
 use LwbWha\Gateway;
+use LwbWha\Inbox;
 use LwbWha\Queue;
 use LwbWha\Settings;
 use LwbWha\Team;
@@ -64,6 +66,7 @@ add_hook('AfterCronJob', 1, function ($vars) {
         }
         Queue::syncOptouts();
         Queue::syncStatuses();
+        Inbox::sync();
         Alerts::check();
         Queue::process();
         Queue::purge();

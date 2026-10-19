@@ -16,6 +16,7 @@ class Admin
 
     const TABS = [
         'dashboard' => 'Tableau de bord',
+        'inbox' => 'Boîte de réception',
         'send' => 'Envoyer',
         'templates' => 'Modèles',
         'messages' => 'Messages',
@@ -41,9 +42,10 @@ class Admin
         return self::$link . ($params ? '&' . http_build_query($params) : '');
     }
 
+    /** @param string|array $tab onglet, ou paramètres complets de l'adresse (filtres conservés) */
     private static function form($action, $tab, $inner, $attrs = '')
     {
-        return '<form method="post" action="' . self::h(self::url(['tab' => $tab])) . '" ' . $attrs . '>'
+        return '<form method="post" action="' . self::h(self::url(is_array($tab) ? $tab : ['tab' => $tab])) . '" ' . $attrs . '>'
             . '<input type="hidden" name="token" value="' . self::h(self::$token) . '">'
             . '<input type="hidden" name="action" value="' . self::h($action) . '">' . $inner . '</form>';
     }
@@ -70,6 +72,11 @@ class Admin
         $tab = isset(self::TABS[$_GET['tab'] ?? '']) ? $_GET['tab'] : 'dashboard';
         $flash = $_SERVER['REQUEST_METHOD'] === 'POST' ? self::handle() : '';
         Settings::all(true);
+        if ($tab === 'inbox') {
+            // Messages arrivés depuis le dernier cron.
+            Inbox::sync();
+        }
+        $unanswered = Inbox::unanswered();
 
         echo '<style>.lwb-card{border:1px solid #e3e6ea;border-radius:6px;padding:14px 16px;margin-bottom:14px;background:#fff}'
             . '.lwb-card h4{margin-top:0}.lwb-kpi{display:inline-block;min-width:150px;margin:0 18px 10px 0}.lwb-kpi b{display:block;font-size:22px}'
@@ -79,7 +86,8 @@ class Admin
         echo $flash;
         echo '<ul class="nav nav-tabs admin-tabs" style="margin-bottom:15px">';
         foreach (self::TABS as $key => $title) {
-            echo '<li class="' . ($tab === $key ? 'active' : '') . '"><a href="' . self::h(self::url(['tab' => $key])) . '">' . $title . '</a></li>';
+            $badge = $key === 'inbox' && $unanswered ? ' <span class="badge" title="Reçus ces dernières 24 h, sans réponse depuis WHMCS">' . $unanswered . '</span>' : '';
+            echo '<li class="' . ($tab === $key ? 'active' : '') . '"><a href="' . self::h(self::url(['tab' => $key])) . '">' . $title . $badge . '</a></li>';
         }
         echo '</ul>';
         $method = 'page' . ucfirst($tab);
@@ -133,8 +141,32 @@ class Admin
                     return self::box('error', 'Aucun numéro de téléphone.');
                 }
                 $res = Queue::sendManual($clientId, $phone, $text, !empty($_POST['attach_invoice']));
+                if ($res['ok']) {
+                    Inbox::markReplied($phone);
+                }
                 return $res['ok'] ? self::box('success', 'Message envoyé au +' . self::h($phone) . '.')
                     : self::box('error', 'Échec : ' . self::h($res['error']));
+
+            case 'inbox_reply':
+                $row = Inbox::ready() ? Capsule::table(Inbox::TABLE)->where('id', $id)->first() : null;
+                $text = trim((string) ($_POST['message'] ?? ''));
+                if (!$row) {
+                    return self::box('error', 'Message introuvable.');
+                }
+                if ($text === '') {
+                    return self::box('error', 'La réponse est vide.');
+                }
+                if ($row->client_id) {
+                    $ctx = Context::build('client', (int) $row->client_id);
+                    list($text) = Events::render($text, $ctx['vars']);
+                }
+                // Même chemin que l'onglet Envoyer : quotas de la passerelle, STOP, simulation de frappe.
+                $res = Queue::sendManual((int) $row->client_id, $row->phone, $text);
+                if (!$res['ok']) {
+                    return self::box('error', 'Échec : ' . self::h($res['error']));
+                }
+                Inbox::markReplied($row->phone);
+                return self::box('success', 'Réponse envoyée au +' . self::h($row->phone) . '.');
 
             case 'test':
                 $phone = Phone::normalize((string) ($_POST['test_phone'] ?? ''));
@@ -296,7 +328,8 @@ class Admin
             . '<div class="lwb-kpi"><b>' . $t['sent_today'] . '</b>envoyés aujourd\'hui</div>'
             . '<div class="lwb-kpi"><b>' . $t['pending'] . '</b>en attente</div>'
             . '<div class="lwb-kpi"><b>' . ($t['read_rate'] === null ? '–' : $t['read_rate'] . ' %') . '</b>lus (7 jours)</div>'
-            . '<div class="lwb-kpi"><b>' . $paid['count'] . '</b>factures payées après un WhatsApp (30 j, ' . self::h($paid['amount']) . ')</div>';
+            . '<div class="lwb-kpi"><b>' . $paid['count'] . '</b>factures payées après un WhatsApp (30 j, ' . self::h($paid['amount']) . ')</div>'
+            . '<div class="lwb-kpi"><b>' . $t['received_today'] . '</b><a href="' . self::h(self::url(['tab' => 'inbox'])) . '">messages reçus aujourd\'hui</a></div>';
         if (Time::inQuietHours()) {
             echo '<p><span class="label label-info">Heures calmes</span> aucun envoi automatique jusqu\'à ' . self::h(Time::quietEnd()) . ' (heure ' . self::h(Time::tz()->getName()) . ').</p>';
         } elseif ($t['pending'] && $t['next']) {
@@ -306,6 +339,109 @@ class Admin
             echo '<p><a href="' . self::h(self::url(['tab' => 'messages', 'status' => 'failed'])) . '">' . $t['failed_today'] . ' échec(s) aujourd\'hui</a></p>';
         }
         echo '</div>';
+    }
+
+    private static function pageInbox()
+    {
+        if (!Settings::isGateway()) {
+            echo self::box('info', 'La boîte de réception fonctionne avec la passerelle WhatsApp Web (fournisseur actuel : <strong>' . self::h(Settings::get('provider')) . '</strong>).');
+        } else {
+            $version = (string) (Gateway::status()['version'] ?? '');
+            if ($version !== '' && version_compare($version, '3.1.0', '<')) {
+                echo self::box('error', 'La passerelle (v' . self::h($version) . ') ne transmet pas encore les messages reçus : mettez à jour ses fichiers '
+                    . '<code>server.js</code>, <code>package.json</code> et <code>package-lock.json</code> (v3.1.0 ou plus), puis redémarrez-la.');
+            }
+        }
+        if (!Inbox::ready()) {
+            echo self::box('info', 'La boîte de réception sera prête au prochain passage du cron WHMCS.');
+            return;
+        }
+        $clientId = (int) ($_GET['userid'] ?? 0);
+        $q = trim((string) ($_GET['q'] ?? ''));
+        $page = max(1, (int) ($_GET['p'] ?? 1));
+        $query = Capsule::table(Inbox::TABLE);
+        if ($clientId) {
+            $query->where('client_id', $clientId);
+        } elseif ($q !== '') {
+            $digits = ltrim(preg_replace('/\D+/', '', $q), '0');
+            if (ctype_digit($q) && strlen($q) < 7) {
+                $query->where('client_id', (int) $q);
+            } elseif (strlen($digits) >= 6) {
+                $query->where('phone', 'like', '%' . $digits . '%');
+            } else {
+                $like = '%' . $q . '%';
+                $ids = Capsule::table('tblclients')->where(function ($w) use ($like) {
+                    $w->where('firstname', 'like', $like)->orWhere('lastname', 'like', $like)->orWhere('companyname', 'like', $like)
+                        ->orWhere(Capsule::raw("CONCAT(firstname, ' ', lastname)"), 'like', $like);
+                })->limit(200)->pluck('id')->all();
+                $query->where(function ($w) use ($ids, $q) {
+                    $w->whereIn('client_id', $ids ?: [-1])->orWhere('name', 'like', '%' . Events::dbEncode($q) . '%');
+                });
+            }
+        }
+        $here = array_filter(['tab' => 'inbox', 'userid' => $clientId ?: null, 'q' => $clientId ? null : ($q !== '' ? $q : null), 'p' => $page > 1 ? $page : null]);
+        $total = (clone $query)->count();
+        $rows = $query->orderBy('received_at', 'desc')->orderBy('id', 'desc')->offset(($page - 1) * 50)->limit(50)->get();
+        $names = Capsule::table('tblclients')->whereIn('id', $rows->pluck('client_id')->unique()->all())->get(['id', 'firstname', 'lastname', 'companyname'])->keyBy('id');
+        $tickets = Capsule::table('tbltickets')->whereIn('id', $rows->pluck('ticket_id')->filter()->unique()->all())->pluck('tid', 'id')->all();
+        $quoted = Capsule::table(Queue::TABLE)->whereIn('id', $rows->pluck('reply_to')->filter()->unique()->all())->get(['id', 'event', 'sent_at', 'created_at'])->keyBy('id');
+        $team = Settings::teamPhones();
+
+        $dept = Settings::bool('inbox_tickets', false) ? (string) Capsule::table('tblticketdepartments')->where('id', Inbox::department())->value('name') : '';
+        echo '<div class="lwb-card"><p style="margin:0">Messages WhatsApp reçus de vos clients (réponses aux notifications, questions…), gardés 30 jours par la passerelle et rapatriés à chaque cron. '
+            . 'Une réponse envoyée d\'ici part de votre numéro WhatsApp, avec les protections anti-bannissement habituelles.</p>'
+            . '<p class="text-muted" style="margin:6px 0 0"><small>Tickets : ' . (Settings::bool('inbox_tickets', false)
+                ? 'les messages d\'un client sont ajoutés à son ticket ouvert, sinon un ticket est ouvert dans le département « ' . self::h($dept) . ' »'
+                : 'désactivé (Configuration &gt; Modules addon &gt; LWB WhatsApp &gt; « Boîte de réception : tickets »)') . '.</small></p></div>';
+        echo '<form method="get" class="form-inline" style="margin-bottom:12px"><input type="hidden" name="module" value="' . Settings::MODULE . '"><input type="hidden" name="tab" value="inbox">'
+            . '<input type="text" name="q" value="' . self::h($clientId ?: $q) . '" placeholder="ID client, nom ou numéro" class="form-control" style="width:240px"> <button class="btn btn-default">Filtrer</button>'
+            . ($clientId || $q !== '' ? ' &nbsp;<a href="' . self::h(self::url(['tab' => 'inbox'])) . '">Tous les messages</a>' : '') . '</form>';
+        $c = $clientId ? Capsule::table('tblclients')->where('id', $clientId)->first(['firstname', 'lastname']) : null;
+        if ($c) {
+            echo '<p>Client : <a href="clientssummary.php?userid=' . $clientId . '"><strong>' . self::h(trim($c->firstname . ' ' . $c->lastname)) . '</strong></a>'
+                . ' · <a href="' . self::h(self::url(['tab' => 'send', 'userid' => $clientId])) . '">Envoyer un message</a>'
+                . ' · <a href="' . self::h(self::url(['tab' => 'messages', 'q' => $clientId])) . '">Messages envoyés</a></p>';
+        }
+
+        echo '<table class="datatable" width="100%"><tr><th>Reçu le</th><th>De</th><th>Message</th><th>Ticket</th><th></th></tr>';
+        if (!count($rows)) {
+            echo '<tr><td colspan="5" class="text-muted">Aucun message reçu' . ($clientId || $q !== '' ? ' pour ce filtre' : ' pour le moment') . '.</td></tr>';
+        }
+        foreach ($rows as $r) {
+            $client = $names[$r->client_id] ?? null;
+            if ($client) {
+                $who = '<a href="clientssummary.php?userid=' . (int) $r->client_id . '">' . self::h(trim($client->firstname . ' ' . $client->lastname)) . '</a>'
+                    . ($client->companyname ? '<br><small>' . self::h($client->companyname) . '</small>' : '');
+            } else {
+                $who = in_array($r->phone, $team, true) ? '<span class="label label-default">équipe</span>' : '<span class="text-muted">Numéro inconnu</span>';
+            }
+            $name = Events::dbDecode($r->name);
+            $who .= '<br><small><a href="' . self::h(self::url(['tab' => 'inbox', 'q' => $r->phone])) . '" title="Tous les messages de ce numéro">+' . self::h($r->phone) . '</a>'
+                . ($name !== '' ? ' · ' . self::h($name) : '') . '</small>';
+            $context = '';
+            if ($r->reply_to && isset($quoted[$r->reply_to])) {
+                $m = $quoted[$r->reply_to];
+                $context = '<small class="text-muted">En réponse à : ' . self::h(self::label($m->event)) . ' (' . self::h(Time::show($m->sent_at ?: $m->created_at, 'd/m H:i')) . ')</small>';
+            }
+            $ticket = $r->ticket_id ? '<a href="supporttickets.php?action=view&id=' . (int) $r->ticket_id . '">#' . self::h($tickets[$r->ticket_id] ?? $r->ticket_id) . '</a>' : '';
+            $state = $r->replied_at ? '<span class="label label-success" title="' . self::h(Time::show($r->replied_at)) . '">Répondu</span> ' : '';
+            $reply = '<details style="display:inline-block"><summary class="btn btn-default btn-xs">Répondre</summary>'
+                . self::form('inbox_reply', $here, '<input type="hidden" name="id" value="' . (int) $r->id . '">'
+                    . '<textarea name="message" rows="3" class="form-control" style="min-width:280px;margin:6px 0" required></textarea>'
+                    . '<button class="btn btn-primary btn-xs">Envoyer sur WhatsApp</button>')
+                . '</details>';
+            echo '<tr><td style="white-space:nowrap">' . self::h(Time::show($r->received_at)) . '</td><td>' . $who . '</td>'
+                . '<td>' . $context . '<div class="lwb-msg">' . self::h(Events::dbDecode($r->message)) . '</div></td>'
+                . '<td>' . $ticket . '</td><td>' . $state . $reply . '</td></tr>';
+        }
+        echo '</table>';
+        if ($total > 50) {
+            echo '<p>';
+            for ($i = 1; $i <= (int) ceil($total / 50) && $i <= 20; $i++) {
+                echo $i === $page ? ' <strong>' . $i . '</strong> ' : ' <a href="' . self::h(self::url(array_merge($here, ['p' => $i]))) . '">' . $i . '</a> ';
+            }
+            echo '</p>';
+        }
     }
 
     private static function pageSend()
@@ -541,7 +677,7 @@ class Admin
             ],
             'Les clients' => [
                 'Demandez-leur d\'<strong>enregistrer votre numéro</strong> : ajoutez « Enregistrez notre WhatsApp : +… » dans vos e-mails et sur vos factures (Configuration &gt; Paramètres généraux &gt; Facturation, texte « Payer à »).',
-                '<strong>Répondez vite</strong> aux messages reçus : les conversations à double sens améliorent la réputation du numéro (et vos ventes).',
+                '<strong>Répondez vite</strong> aux messages reçus (onglet <strong>Boîte de réception</strong>) : les conversations à double sens améliorent la réputation du numéro (et vos ventes).',
                 'Chaque client peut indiquer un autre <strong>numéro WhatsApp</strong> ou désactiver les notifications dans son profil (champs ajoutés par le module).',
                 'Corrigez les numéros invalides : l\'onglet Messages indique les échecs « n\'a pas de compte WhatsApp ».',
             ],
@@ -583,7 +719,8 @@ class Admin
         $html = '<div class="panel panel-default" style="margin-bottom:15px"><div class="panel-heading"><strong>WhatsApp</strong> · '
             . ($who['phone'] !== '' ? '+' . self::h($who['phone']) : '<span class="text-danger">aucun numéro</span>')
             . ($who['blocked'] !== '' && $who['phone'] !== '' ? ' · <span class="text-warning">' . self::h($who['blocked']) . '</span>' : '')
-            . ' · <a href="' . $base . '&tab=send&userid=' . (int) $client->id . '">Envoyer un message</a> · <a href="' . $base . '&tab=messages&q=' . (int) $client->id . '">Historique</a></div>';
+            . ' · <a href="' . $base . '&tab=send&userid=' . (int) $client->id . '">Envoyer un message</a> · <a href="' . $base . '&tab=messages&q=' . (int) $client->id . '">Historique</a>'
+            . ' · <a href="' . $base . '&tab=inbox&userid=' . (int) $client->id . '">Messages reçus</a></div>';
         if (count($rows)) {
             $html .= '<table class="table table-condensed" style="margin:0;font-size:12px">';
             foreach ($rows as $r) {
@@ -591,6 +728,17 @@ class Admin
                 $delivery = ['delivered' => ' ✓✓', 'read' => ' <span class="lwb-read" style="color:#34B7F1">✓✓ lu</span>'][$r->delivery] ?? '';
                 $html .= '<tr><td>' . self::h(Time::show($r->sent_at ?: $r->created_at)) . '</td><td>' . self::h(self::label($r->event)) . '</td><td><span class="label label-' . $lbl[1] . '">'
                     . $lbl[0] . '</span>' . $delivery . '</td></tr>';
+            }
+            $html .= '</table>';
+        }
+        $received = Inbox::ready() ? Capsule::table(Inbox::TABLE)->where('client_id', $client->id)->orderBy('received_at', 'desc')->orderBy('id', 'desc')->limit(5)->get() : [];
+        if (count($received)) {
+            $html .= '<div style="padding:8px 10px 4px;font-size:12px;border-top:1px solid #ddd"><strong>Derniers messages reçus</strong></div>'
+                . '<table class="table table-condensed" style="margin:0;font-size:12px">';
+            foreach ($received as $r) {
+                $html .= '<tr><td style="white-space:nowrap">' . self::h(Time::show($r->received_at)) . '</td><td>' . self::h(Inbox::excerpt(Events::dbDecode($r->message), 140))
+                    . ($r->replied_at ? ' <span class="label label-success">répondu</span>' : '')
+                    . ($r->ticket_id ? ' <a href="supporttickets.php?action=view&id=' . (int) $r->ticket_id . '">ticket</a>' : '') . '</td></tr>';
             }
             $html .= '</table>';
         }
@@ -608,7 +756,8 @@ class Admin
         return '<div class="widget-content-padded"><p><span class="label label-' . $l[1] . '">' . $l[0] . '</span>'
             . ($st === 'open' ? ' +' . self::h(Gateway::number()) : '') . '</p>'
             . '<p>' . $t['sent_today'] . ' envoyé(s) aujourd\'hui · ' . $t['pending'] . ' en attente'
-            . ($t['read_rate'] !== null ? ' · ' . $t['read_rate'] . ' % lus (7 j)' : '') . '</p>'
+            . ($t['read_rate'] !== null ? ' · ' . $t['read_rate'] . ' % lus (7 j)' : '')
+            . ($t['received_today'] ? ' · <a href="addonmodules.php?module=' . Settings::MODULE . '&tab=inbox">' . $t['received_today'] . ' reçu(s)</a>' : '') . '</p>'
             . '<a href="addonmodules.php?module=' . Settings::MODULE . '" class="btn btn-default btn-sm">Ouvrir LWB WhatsApp</a></div>';
     }
 }

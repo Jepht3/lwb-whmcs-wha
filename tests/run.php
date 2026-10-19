@@ -7,6 +7,7 @@ define('WHMCS', true);
 require __DIR__ . '/../modules/addons/lwb_whmcs_wha/lib/bootstrap.php';
 
 use LwbWha\Events;
+use LwbWha\Inbox;
 use LwbWha\Phone;
 use LwbWha\Settings;
 use LwbWha\Time;
@@ -85,6 +86,35 @@ foreach (Events::defaults() as $key => $def) {
     $unknown = array_values(array_diff(array_unique($m[1]), Events::vars($def['rel'], !empty($def['team']))));
     check("$key : variables connues", $unknown, []);
 }
+
+// --- Boîte de réception
+$raw = ['id' => '3EB0C767D26A1D35E4D4', 'phone' => '243816123456', 'name' => ' Awa 🌸 ', 'text' => "  Bonjour,\r\nj'ai payé  ",
+    'at' => 1760882400000, 'received' => 1760882401000, 'quoted' => 'BAE5F1A2'];
+check('message reçu : champs', Inbox::fromGateway($raw), ['wa_id' => '3EB0C767D26A1D35E4D4', 'phone' => '243816123456', 'name' => 'Awa 🌸',
+    'text' => "Bonjour,\nj'ai payé", 'quoted' => 'BAE5F1A2', 'at' => 1760882400]);
+check('message sans texte ignoré', Inbox::fromGateway(['text' => '   '] + $raw), null);
+check('numéro trop court ignoré', Inbox::fromGateway(['phone' => '12345'] + $raw), null);
+check('identifiant invalide ignoré', Inbox::fromGateway(['id' => "x'; DROP"] + $raw), null);
+check('pas un tableau', Inbox::fromGateway('texte'), null);
+check('texte non scalaire ignoré', Inbox::fromGateway(['text' => ['a']] + $raw), null);
+check('citation invalide écartée', Inbox::fromGateway(['quoted' => '<script>'] + $raw)['quoted'], '');
+check('texte limité à 4000 caractères', mb_strlen(Inbox::fromGateway(['text' => str_repeat('é', 5000)] + $raw)['text']), 4000);
+check('nom limité à 25 caractères', mb_strlen(Inbox::fromGateway(['name' => str_repeat('🌸', 40)] + $raw)['name']), 25);
+check('nom encodé tient dans la colonne', strlen(Events::dbEncode(Inbox::fromGateway(['name' => str_repeat('🌸', 40)] + $raw)['name'])) <= 255, true);
+check('date absente : maintenant', abs(Inbox::fromGateway(['at' => 0] + $raw)['at'] - time()) < 5, true);
+check('ticket : sans emoji ni balise', Inbox::plain("Merci 🙏 <b>ok</b>  👍🏽"), 'Merci ‹b›ok‹/b›');
+check('ticket : emoji seul', Inbox::plain('👍'), '(emoji)');
+check('ticket : cœur gardé', Inbox::plain('❤️ merci'), '❤ merci');
+check('extrait court', Inbox::excerpt("Bonjour\n  Awa", 40), 'Bonjour Awa');
+check('extrait coupé', Inbox::excerpt('abcdef', 4), 'abc…');
+check('sujet de ticket', Inbox::subject("J'ai payé la facture n°4280 hier soir par M-Pesa, merci de vérifier svp\nDeuxième ligne"),
+    "WhatsApp : J'ai payé la facture n°4280 hier soir par M-Pesa, merci de…");
+check('texte de ticket (un message)', Inbox::ticketText([['text' => 'Facture payée 🙏', 'time' => '14:31']], '243816123456', '19/10/2026'),
+    "Facture payée\n\n— Message WhatsApp du +243816123456, le 19/10/2026 à 14:31.");
+check('texte de ticket (plusieurs)', Inbox::ticketText([['text' => 'Bonjour', 'time' => '14:30'], ['text' => "J'ai payé", 'time' => '14:31']], '243816123456', '19/10/2026'),
+    "[14:30] Bonjour\n\n[14:31] J'ai payé\n\n— Messages WhatsApp du +243816123456, le 19/10/2026.");
+$rows = [['id' => 1, 'client_id' => '5'], ['id' => 2, 'client_id' => '7'], ['id' => 3, 'client_id' => '5']];
+check('regroupement par client', Inbox::group($rows), [5 => [$rows[0], $rows[2]], 7 => [$rows[1]]]);
 
 echo $count - $failures . " / $count tests réussis\n";
 exit($failures ? 1 : 0);

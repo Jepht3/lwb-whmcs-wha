@@ -1,5 +1,32 @@
 # Journal des versions
 
+## 3.1.0 — 2026-10-19
+
+Les réponses des clients ne restent plus sur le téléphone : elles arrivent dans WHMCS.
+
+**Module WHMCS**
+- Onglet **Boîte de réception** : messages reçus des clients, filtre par client, nom ou numéro, lien vers la
+  fiche client, message cité (« En réponse à : … »), **réponse rapide** envoyée par la file habituelle
+  (quotas de la passerelle, STOP, simulation de frappe). Badge des messages sans réponse des dernières 24 h.
+- Messages rapatriés à chaque cron (et à l'ouverture de l'onglet) dans la table `mod_lwbwha_inbox`,
+  rattachés au client par son numéro, y compris le champ « Numéro WhatsApp ».
+- Option **tickets** (désactivée par défaut) : les messages d'un client sont ajoutés à son ticket ouvert
+  (celui de la notification citée en priorité), sinon un ticket est ouvert dans le département choisi, sans
+  e-mail au client. Messages reçus ensemble regroupés en une seule réponse ; emojis retirés et chevrons
+  neutralisés dans le ticket.
+- Fiche client : les 5 derniers messages reçus. Tableau de bord et widget : messages reçus aujourd'hui.
+- Un message envoyé depuis l'onglet Envoyer marque aussi comme répondus les messages de ce numéro.
+- Correction : un numéro de l'équipe ou un numéro d'aperçu n'est plus pris pour celui d'un client (alertes
+  équipe, désinscriptions).
+- Purge des messages reçus selon la durée de conservation de l'historique.
+
+**Passerelle** (dépendances inchangées)
+- `GET /inbox?since=<ms>` : messages reçus, gardés 30 jours (2 000 au plus) dans `data/inbox.json`.
+- Médias signalés dans le texte : `[Photo] légende`, `[Message vocal]`, `[Document : nom]`, `[Position]`…
+- Les messages arrivés pendant une coupure de la passerelle sont traités à la reconnexion (STOP compris).
+- STOP / START reconnus aussi dans les discussions éphémères ; numéro retrouvé pour les discussions
+  adressées par LID.
+
 ## 3.0.0 — 2026-10-19
 
 Nouveau nom : **lwb-whmcs-wha** (module WHMCS `lwb_whmcs_wha`), code réorganisé en classes (`LwbWha\…`).

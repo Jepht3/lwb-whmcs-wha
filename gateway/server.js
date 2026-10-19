@@ -8,6 +8,7 @@
  *   GET  /status     état, QR code, quotas, limites WhatsApp, version
  *   POST /send       {"phone":"243812345678","message":"...","document":{...}}
  *   POST /statuses   {"ids":["3EB0..."]}  -> distribué / lu
+ *   GET  /inbox      messages reçus des clients après ?since=<ms> (boîte de réception WHMCS)
  *   GET  /optouts    clients ayant répondu STOP
  *   POST /optouts    {"phone":"...","action":"add"|"remove"}
  *   POST /pair       {"phone":"..."} -> code de liaison à 8 caractères
@@ -36,11 +37,14 @@ import makeWASocket, {
     Browsers,
     DisconnectReason,
     fetchLatestBaileysVersion,
+    getContentType,
     isJidBroadcast,
     isJidGroup,
     isJidNewsletter,
     isJidStatusBroadcast,
+    isLidUser,
     isPnUser,
+    normalizeMessageContent,
     proto,
     useMultiFileAuthState,
 } from 'baileys';
@@ -86,6 +90,9 @@ const OPTIN_REPLY = env('OPTIN_REPLY', 'Notifications WhatsApp réactivées. Mer
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+// Boîte de réception : messages reçus gardés pour WHMCS.
+const INBOX_DAYS = 30;
+const INBOX_MAX = 2000;
 
 if (API_KEY.length < 16) {
     console.error('API_KEY manquante ou trop courte (16 caractères minimum) : renseignez-la dans le fichier .env');
@@ -167,7 +174,12 @@ const contacts = new Store('contacts.json', {});
 const statuses = new Store('statuses.json', {});
 // msgstore : { messageId: [proto base64, ms] }  pour les renvois (getMessage)
 const msgstore = new Store('msgstore.json', {});
-const stores = [stats, optout, contacts, statuses, msgstore];
+// inbox    : [{ id, phone, name, text, at, received, quoted }]  messages reçus, dans l'ordre d'arrivée
+const inbox = new Store('inbox.json', []);
+if (!Array.isArray(inbox.data)) inbox.data = [];
+const stores = [stats, optout, contacts, statuses, msgstore, inbox];
+// Rang d'arrivée strictement croissant : WHMCS reprend là où il s'était arrêté (GET /inbox?since=).
+let lastReceived = inbox.data.reduce((max, m) => Math.max(max, m.received || 0), 0);
 
 function storeMessage(id, message) {
     if (!id || !message) {
@@ -205,6 +217,7 @@ function prune() {
     }
     stats.data.sent = stats.data.sent.filter((t) => now - t < DAY);
     stats.data.newSent = stats.data.newSent.filter((t) => now - t < DAY);
+    inbox.data = inbox.data.filter((m) => now - m.received < INBOX_DAYS * DAY).slice(-INBOX_MAX);
     stores.forEach((s) => s.save());
 }
 setInterval(prune, HOUR).unref();
@@ -441,31 +454,103 @@ function phoneOf(key) {
     return pn ? pn.split('@')[0].split(':')[0] : null;
 }
 
+/** Numéro de l'expéditeur, y compris dans une discussion adressée par LID (correspondance connue de Baileys). */
+async function senderPhone(s, key) {
+    const phone = phoneOf(key);
+    if (phone || !isLidUser(key.remoteJid)) return phone;
+    try {
+        const pn = await s.signalRepository.lidMapping.getPNForLID(key.remoteJid);
+        return pn && isPnUser(pn) ? pn.split('@')[0].split(':')[0] : null;
+    } catch {
+        return null;
+    }
+}
+
+const MEDIA = {
+    imageMessage: 'Photo',
+    videoMessage: 'Vidéo',
+    ptvMessage: 'Vidéo',
+    audioMessage: 'Message vocal',
+    documentMessage: 'Document',
+    stickerMessage: 'Autocollant',
+    locationMessage: 'Position',
+    liveLocationMessage: 'Position en direct',
+    contactMessage: 'Contact',
+    contactsArrayMessage: 'Contacts',
+};
+
+/**
+ * Texte d'un message reçu tel que l'affiche WHMCS (« [Photo] légende » pour un média)
+ * et identifiant du message cité. Texte vide : rien à afficher (réaction, modification…).
+ */
+function readContent(message) {
+    const content = normalizeMessageContent(message);
+    const type = getContentType(content);
+    const part = type ? content[type] : null;
+    const quoted = (part && typeof part === 'object' && part.contextInfo?.stanzaId) || null;
+    if (type === 'conversation' || type === 'extendedTextMessage') {
+        return { text: String((type === 'conversation' ? part : part?.text) || '').trim(), quoted };
+    }
+    if (!MEDIA[type] || !part) {
+        return { text: '', quoted: null };
+    }
+    const label = type === 'audioMessage' && !part.ptt ? 'Audio' : MEDIA[type];
+    const detail = (type === 'documentMessage' && part.fileName) || (type === 'contactMessage' && part.displayName) || '';
+    const caption = String(part.caption || '').trim();
+    return { text: `[${label}${detail ? ' : ' + detail : ''}]${caption ? ' ' + caption : ''}`, quoted };
+}
+
+/** Garde un message reçu pour la boîte de réception de WHMCS (GET /inbox). */
+function remember(msg, phone, text, quoted) {
+    const id = msg.key.id;
+    if (!id || !text || inbox.data.some((m) => m.id === id)) return;
+    const now = Date.now();
+    const sec = Number(msg.messageTimestamp?.toNumber?.() ?? msg.messageTimestamp);
+    lastReceived = Math.max(now, lastReceived + 1);
+    inbox.data.push({
+        id,
+        phone,
+        name: String(msg.pushName || '').trim().slice(0, 25).toWellFormed(),
+        text: text.slice(0, 4000).toWellFormed(),
+        at: sec > 0 ? sec * 1000 : now,
+        received: lastReceived,
+        ...(quoted ? { quoted } : {}),
+    });
+    if (inbox.data.length > INBOX_MAX) inbox.data.splice(0, inbox.data.length - INBOX_MAX);
+    inbox.save();
+}
+
 async function onIncoming(s, { messages, type }) {
-    if (sock !== s || type !== 'notify') return;
+    // « append » : messages arrivés pendant une déconnexion de la passerelle.
+    if (sock !== s || (type !== 'notify' && type !== 'append')) return;
     for (const msg of messages) {
         if (!msg.message || msg.key.fromMe) continue;
         const jid = msg.key.remoteJid || '';
         if (READ_INCOMING) {
             await s.readMessages([msg.key]).catch(() => {});
         }
-        const phone = phoneOf(msg.key);
+        const phone = await senderPhone(s, msg.key);
         if (!phone) continue;
         const c = contacts.data[phone] || { exists: true, jid: `${phone}@s.whatsapp.net`, checked: Date.now() };
         c.lastIn = Date.now();
         contacts.data[phone] = c;
         contacts.save();
-        const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim().toUpperCase();
-        if (OPTOUT_WORDS.includes(text)) {
+        const { text, quoted } = readContent(msg.message);
+        const word = text.toUpperCase();
+        if (OPTOUT_WORDS.includes(word)) {
             optout.data[phone] = new Date().toISOString();
             optout.save();
             log('Désinscription :', phone);
             await s.sendMessage(jid, { text: OPTOUT_REPLY }).catch(() => {});
-        } else if (OPTIN_WORDS.includes(text) && optout.data[phone]) {
-            delete optout.data[phone];
-            optout.save();
-            log('Réinscription :', phone);
-            await s.sendMessage(jid, { text: OPTIN_REPLY }).catch(() => {});
+        } else if (OPTIN_WORDS.includes(word)) {
+            if (optout.data[phone]) {
+                delete optout.data[phone];
+                optout.save();
+                log('Réinscription :', phone);
+                await s.sendMessage(jid, { text: OPTIN_REPLY }).catch(() => {});
+            }
+        } else {
+            remember(msg, phone, text, quoted);
         }
     }
 }
@@ -694,6 +779,13 @@ const routes = {
         return { ok: true, statuses: out };
     },
 
+    'GET /inbox': async (body, query) => {
+        const since = Number(query.get('since')) || 0;
+        const limit = Math.min(500, Math.max(1, parseInt(query.get('limit'), 10) || 200));
+        const fresh = inbox.data.filter((m) => m.received > since);
+        return { ok: true, messages: fresh.slice(0, limit), more: fresh.length > limit };
+    },
+
     'GET /optouts': async () => ({ ok: true, optouts: optout.data }),
 
     'POST /optouts': async (body) => {
@@ -740,13 +832,14 @@ const server = http.createServer(async (req, res) => {
     if (!authorized(req)) {
         return reply(res, 401, { ok: false, error: 'Clé API invalide' });
     }
-    const route = routes[`${req.method} ${new URL(req.url, 'http://localhost').pathname}`];
+    const url = new URL(req.url, 'http://localhost');
+    const route = routes[`${req.method} ${url.pathname}`];
     if (!route) {
         return reply(res, 404, { ok: false, error: 'Route inconnue' });
     }
     try {
         const body = req.method === 'POST' ? await readJson(req) : {};
-        return reply(res, 200, await route(body));
+        return reply(res, 200, await route(body, url.searchParams));
     } catch (err) {
         if (err instanceof SendError) {
             return reply(res, err.httpCode, { ok: false, error: err.message, ...err.extra });

@@ -449,11 +449,25 @@ class Queue
         }
     }
 
+    /** Client d'un numéro WhatsApp (0 si inconnu). */
     public static function clientByPhone($phone)
     {
-        $id = (int) Capsule::table(self::TABLE)->where('phone', $phone)->where('client_id', '>', 0)->orderBy('id', 'desc')->value('client_id');
+        // Seuls les envois au client lui-même comptent : une alerte équipe ou un aperçu
+        // part vers un numéro interne en portant l'ID du client concerné.
+        $id = (int) Capsule::table(self::TABLE)->where('phone', $phone)->where('client_id', '>', 0)->whereIn('source', ['auto', 'manual'])
+            ->orderBy('id', 'desc')->value('client_id');
         if ($id) {
             return $id;
+        }
+        $field = Phone::fieldId(Phone::FIELD_NUMBER);
+        if ($field) {
+            $custom = Capsule::table('tblcustomfieldsvalues as v')->join('tblclients as c', 'c.id', '=', 'v.relid')
+                ->where('v.fieldid', $field)->where('v.value', '!=', '')->get(['c.id', 'v.value', 'c.country']);
+            foreach ($custom as $c) {
+                if (Phone::normalize($c->value, $c->country) === $phone) {
+                    return (int) $c->id;
+                }
+            }
         }
         foreach (Capsule::table('tblclients')->where('phonenumber', 'like', '%' . substr($phone, -6))->get(['id', 'phonenumber', 'country']) as $c) {
             if (Phone::normalize($c->phonenumber, $c->country) === $phone) {
@@ -472,5 +486,8 @@ class Queue
         $limit = date('Y-m-d H:i:s', time() - Settings::int('retention_days', 180, 30, 3650) * 86400);
         Capsule::table(self::TABLE)->where('created_at', '<', $limit)->where('status', '!=', 'pending')->delete();
         Capsule::table(Links::TABLE)->where('created_at', '<', $limit)->delete();
+        if (Inbox::ready()) {
+            Capsule::table(Inbox::TABLE)->where('received_at', '<', $limit)->delete();
+        }
     }
 }

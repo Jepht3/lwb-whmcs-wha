@@ -20,7 +20,7 @@ function lwb_whmcs_wha_config()
 {
     return [
         'name' => 'LWB WhatsApp (lwb-whmcs-wha)',
-        'description' => 'Notifications WhatsApp sans API officielle : factures avec PDF et lien de paiement, relances, paiements, activations, domaines, tickets, alertes équipe. Anti-bannissement intégré.',
+        'description' => 'Notifications WhatsApp sans API officielle : factures avec PDF et lien de paiement, relances, paiements, activations, domaines, tickets, alertes équipe, boîte de réception. Anti-bannissement intégré.',
         'version' => \LwbWha\Settings::VERSION,
         'author' => 'LE WEB MAX',
         'language' => 'french',
@@ -121,6 +121,17 @@ function lwb_whmcs_wha_config()
                 'Type' => 'text',
                 'Size' => '60',
                 'Description' => 'Alertes internes (paiement, commande, ticket, résiliation). Séparés par des virgules, ex. +243812345678',
+            ],
+            'inbox_tickets' => [
+                'FriendlyName' => 'Boîte de réception : tickets',
+                'Type' => 'yesno',
+                'Description' => 'Ajoute les messages WhatsApp d\'un client à son ticket ouvert, ou lui ouvre un ticket (sans e-mail au client)',
+            ],
+            'inbox_department' => [
+                'FriendlyName' => 'Boîte de réception : département',
+                'Type' => 'dropdown',
+                'Options' => \LwbWha\Inbox::departments(),
+                'Description' => 'Département des tickets ouverts depuis WhatsApp',
             ],
             'alert_email' => [
                 'FriendlyName' => 'Alerte e-mail si déconnecté',

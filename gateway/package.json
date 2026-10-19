@@ -1,6 +1,6 @@
 {
   "name": "lwb-whmcs-wha-gateway",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "private": true,
   "description": "Passerelle WhatsApp Web auto-hébergée (Baileys) pour le module WHMCS lwb-whmcs-wha",
   "type": "module",
