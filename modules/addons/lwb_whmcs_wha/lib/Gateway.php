@@ -89,7 +89,8 @@ class Gateway
         if (is_file($logFile) && filesize($logFile) > 2 * 1024 * 1024) {
             @rename($logFile, $logFile . '.1');
         }
-        $cmd = 'cd ' . escapeshellarg($dir) . ' && nohup setsid ' . escapeshellarg($node)
+        // umask 077 : journal et session lisibles par le seul propriétaire.
+        $cmd = 'umask 077 && cd ' . escapeshellarg($dir) . ' && nohup setsid ' . escapeshellarg($node)
             . ' --env-file-if-exists=.env server.js >> gateway.log 2>&1 < /dev/null &';
         $p = proc_open(['/bin/sh', '-c', $cmd], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
         if (is_resource($p)) {

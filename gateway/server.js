@@ -47,6 +47,16 @@ import makeWASocket, {
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
+// Fichiers créés par la passerelle (session, journaux) lisibles par son seul propriétaire.
+process.umask(0o077);
+// libsignal écrit dans la console des objets de session contenant des clés : on les écarte.
+console.info = () => {};
+const consoleWarn = console.warn.bind(console);
+console.warn = (...args) => {
+    if (typeof args[0] === 'string' && /session/i.test(args[0])) return;
+    consoleWarn(...args);
+};
+
 const env = (name, def) => (process.env[name] !== undefined && process.env[name] !== '' ? process.env[name] : def);
 const int = (name, def) => {
     const v = parseInt(env(name, String(def)), 10);
@@ -329,9 +339,9 @@ async function connect() {
         // Se présente comme un WhatsApp Web classique sous Chrome.
         browser: Browsers.ubuntu('Chrome'),
         markOnlineOnConnect: false,
+        // Pas d'historique complet ; la synchronisation initiale reste active (Baileys en a
+        // besoin pour les correspondances LID et elle révèle les discussions existantes).
         syncFullHistory: false,
-        // Pas d'historique : moins de mémoire, moins de trafic.
-        shouldSyncHistoryMessage: () => false,
         shouldIgnoreJid: (jid) => !!(isJidGroup(jid) || isJidBroadcast(jid) || isJidNewsletter(jid) || isJidStatusBroadcast(jid)),
         // Renvoi des messages demandés par le téléphone du destinataire.
         getMessage: getStoredMessage,
@@ -342,6 +352,7 @@ async function connect() {
     s.ev.on('connection.update', (u) => onConnection(s, u).catch((err) => logger.error({ err }, 'connection.update')));
     s.ev.on('messages.upsert', (m) => onIncoming(s, m).catch((err) => logger.error({ err }, 'messages.upsert')));
     s.ev.on('messages.update', onStatusUpdate);
+    s.ev.on('messaging-history.set', (h) => onHistory(s, h));
     s.ev.on('message-capping.update', (info) => {
         state.newChatCap = summarizeCap(info);
     });
@@ -459,6 +470,32 @@ async function onIncoming(s, { messages, type }) {
     }
 }
 
+/**
+ * Synchronisation initiale (à la liaison) : les discussions déjà présentes sur le
+ * téléphone ne sont pas de « nouveaux contacts » pour les limites anti-bannissement.
+ */
+function onHistory(s, { chats = [], lidPnMappings = [] }) {
+    if (sock !== s) return;
+    const lidToPn = new Map(lidPnMappings.map((m) => [m.lid, m.pn]));
+    let known = 0;
+    for (const chat of chats) {
+        let jid = chat.id || '';
+        if (!isPnUser(jid)) jid = lidToPn.get(jid) || '';
+        if (!isPnUser(jid)) continue;
+        const phone = jid.split('@')[0].split(':')[0];
+        const c = contacts.data[phone] || { exists: true, jid: `${phone}@s.whatsapp.net`, checked: Date.now() };
+        if (!c.history) {
+            c.history = Date.now();
+            known++;
+        }
+        contacts.data[phone] = c;
+    }
+    if (known) {
+        contacts.save();
+        log(`${known} discussion(s) existante(s) reconnue(s) sur le téléphone.`);
+    }
+}
+
 function onStatusUpdate(updates) {
     let changed = false;
     for (const { key, update } of updates) {
@@ -528,7 +565,7 @@ async function doSend(phone, message, document) {
     if (!contact.exists) {
         throw new SendError(410, 'Le numéro ' + phone + " n'a pas de compte WhatsApp", { reason: 'not_on_whatsapp' });
     }
-    const isNew = !contact.lastOut && !contact.lastIn;
+    const isNew = !contact.lastOut && !contact.lastIn && !contact.history;
     if (isNew) {
         const block = newContactBlock();
         if (block) {
@@ -630,7 +667,7 @@ const routes = {
         queue: pending,
         quota: quota(),
         optout_count: Object.keys(optout.data).length,
-        contacts_known: Object.values(contacts.data).filter((c) => c.lastOut || c.lastIn).length,
+        contacts_known: Object.values(contacts.data).filter((c) => c.lastOut || c.lastIn || c.history).length,
     }),
 
     'POST /send': async (body) => {
