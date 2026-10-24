@@ -26,6 +26,12 @@ class Queue
 {
     const TABLE = 'mod_lwbwha_messages';
 
+    /**
+     * Messages attendus par le client juste après son action : ils partent aussi
+     * pendant les heures calmes (les relances et rappels, eux, attendent le matin).
+     */
+    const NIGHT_OK = ['invoice_paid', 'service_unsuspended', 'service_welcome', 'order_confirmation', 'ticket_reply', 'client_signup', 'domain_registered', 'domain_renewed'];
+
     public static function template($event)
     {
         $t = Capsule::table('mod_lwbwha_templates')->where('event', $event)->first();
@@ -182,14 +188,17 @@ class Queue
         if (Settings::isGateway() && !Gateway::isOpen()) {
             return;
         }
-        if (Time::inQuietHours()) {
-            return;
-        }
+        $quiet = Time::inQuietHours();
         Capsule::table(self::TABLE)->where('status', 'sending')->where('next_try', '<', date('Y-m-d H:i:s', time() - 900))
             ->update(['status' => 'pending']);
         @set_time_limit(0);
         $batch = Settings::int('batch_size', 5, 1, 20);
         $rows = Capsule::table(self::TABLE)->where('status', 'pending')->where('next_try', '<=', date('Y-m-d H:i:s'))
+            ->when($quiet, function ($q) {
+                $q->where(function ($w) {
+                    $w->whereIn('event', self::NIGHT_OK)->orWhere('source', 'team');
+                });
+            })
             ->orderBy('priority', 'desc')->orderBy('id')->limit($batch * 4)->get();
         $sent = 0;
         foreach ($rows as $row) {

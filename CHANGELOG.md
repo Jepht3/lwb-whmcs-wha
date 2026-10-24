@@ -1,5 +1,18 @@
 # Journal des versions
 
+## Non publié — 2026-10-24
+
+Les notifications partent au bon moment.
+
+**Module WHMCS**
+- Heures calmes : les messages attendus par le client juste après son action (paiement reçu, service
+  réactivé ou activé, commande reçue, réponse à un ticket, bienvenue, domaine enregistré ou renouvelé) et les
+  alertes équipe partent aussi la nuit. Les relances et rappels attendent toujours la fin des heures calmes.
+
+**Passerelle**
+- Ajout de la dépendance `link-preview-js` (aperçu des liens dans les messages ; Baileys l'importe sans la
+  déclarer, d'où l'erreur « Cannot find package 'link-preview-js' »).
+
 ## 3.2.0 — 2026-10-19
 
 Envoyer à un client une facture ou une notification précise, sans renvoyer l'e-mail WHMCS.
