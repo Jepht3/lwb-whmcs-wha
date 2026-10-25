@@ -1,5 +1,13 @@
 # Journal des versions
 
+## Non publié — 2026-10-25
+
+**Module WHMCS**
+- Remise pour paiement anticipé : les messages annoncent le **prix normal** de la facture, puis la remise comme
+  une offre conditionnelle (« réglez-la au plus tard le … et ne payez que … ; passé cette date, le montant sera
+  de … »), au lieu d'annoncer le prix remisé « déjà déduit ». À 3 jours ou moins de la date limite, le message
+  indique « Plus que N jours » ou « Dernier jour ».
+
 ## Non publié — 2026-10-24
 
 Les notifications partent au bon moment.

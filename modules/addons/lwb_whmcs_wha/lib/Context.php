@@ -127,17 +127,27 @@ class Context
                     })->all();
                 $days = Time::daysUntil($obj->duedate);
                 $invoiceLink = $base . 'viewinvoice.php?id=' . $obj->id;
+                // Remise anticipée en cours : on annonce le prix normal, la remise est une offre à saisir.
+                $early = self::activeEarlyDiscount($obj);
+                $extra = $early ? (float) $early->amount : 0.0;
                 $vars = [
                     'invoice_id' => $obj->invoicenum !== '' ? $obj->invoicenum : $obj->id,
-                    'total' => self::money($obj->total, $clientId),
-                    'balance' => self::money(max(0, $obj->total - $paid), $clientId),
+                    'total' => self::money($obj->total + $extra, $clientId),
+                    'balance' => self::money(max(0, $obj->total - $paid) + $extra, $clientId),
                     'due_date' => Time::date($obj->duedate),
                     'days_left' => $days,
                     'due_when' => Time::when($days, $obj->duedate),
                     'suspend_when' => self::suspendWhen($obj->duedate),
                     'invoice_link' => $link('url', $obj->id, $invoiceLink),
                     'pay_link' => $obj->status === 'Unpaid' ? $link('pay', $obj->id, self::payUrl($obj->id)) : $link('url', $obj->id, $invoiceLink),
-                    'early_discount' => self::earlyDiscount($obj, $clientId),
+                    'early_discount' => $early ? self::earlyOfferText(
+                        Time::daysUntil($early->deadline),
+                        Time::date($early->deadline),
+                        self::money(max(0, $obj->total - $paid), $clientId),
+                        self::money($early->amount, $clientId),
+                        self::money(max(0, $obj->total - $paid) + $extra, $clientId),
+                        defined('LWM_EARLY_PERCENT') ? (int) LWM_EARLY_PERCENT : 0
+                    ) : '',
                     'items' => implode("\n", $items),
                     'payment_method' => self::gatewayName($obj->paymentmethod),
                 ];
@@ -338,25 +348,44 @@ class Context
     }
 
     /**
-     * Remise pour paiement anticipé (hook lewebmax_early_payment.php), mise en
-     * avant tant qu'elle est valable. Vide si ce hook n'est pas installé.
+     * Remise pour paiement anticipé encore valable (hook lewebmax_early_payment.php), ou null.
+     * La ligne de remise est déjà sur la facture : le total WHMCS est le prix remisé.
      */
-    private static function earlyDiscount($inv, $clientId)
+    private static function activeEarlyDiscount($inv)
     {
         try {
             if ($inv->status !== 'Unpaid' || !Capsule::schema()->hasTable('mod_lwm_early_discounts')) {
-                return '';
+                return null;
             }
-            $d = Capsule::table('mod_lwm_early_discounts')->where('invoice_id', $inv->id)->whereNull('removed_at')
-                ->where('deadline', '>=', Time::today())->first();
-            if (!$d) {
-                return '';
-            }
-            $percent = defined('LWM_EARLY_PERCENT') ? ' (-' . LWM_EARLY_PERCENT . ' %)' : '';
-            return "\n🎁 *Bonus paiement anticipé* : réglez " . Time::when(Time::daysUntil($d->deadline), $d->deadline) . ' au plus tard et économisez *'
-                . self::money($d->amount, $clientId) . '*' . $percent . ", déjà déduits du montant !\n";
+            return Capsule::table('mod_lwm_early_discounts')->where('invoice_id', $inv->id)->whereNull('removed_at')
+                ->where('deadline', '>=', Time::today())->first() ?: null;
         } catch (\Throwable $e) {
-            return '';
+            return null;
         }
+    }
+
+    /**
+     * Texte de l'offre : prix normal d'abord (dans le message), puis le prix remisé
+     * comme une offre conditionnelle, avec sa date limite et le prix après cette date.
+     *
+     * @param int    $daysLeft jours avant la date limite (0 = aujourd'hui)
+     * @param string $date     date limite (jj/mm/aaaa)
+     * @param string $price    montant à payer avec la remise
+     * @param string $saving   économie
+     * @param string $full     montant normal, dû après la date limite
+     * @param int    $percent  pourcentage de remise (0 = non affiché)
+     */
+    public static function earlyOfferText($daysLeft, $date, $price, $saving, $full, $percent = 0)
+    {
+        $pct = $percent > 0 ? '-' . $percent . ' %, soit ' : '';
+        if ($daysLeft <= 0) {
+            $head = "⏳ *Dernier jour* pour profiter de l'offre paiement anticipé";
+        } elseif ($daysLeft <= 3) {
+            $head = '⏳ *Plus que ' . $daysLeft . ' jour' . ($daysLeft > 1 ? 's' : '') . "* pour profiter de l'offre paiement anticipé";
+        } else {
+            $head = '🎁 *Offre paiement anticipé*';
+        }
+        return "\n" . $head . ' : réglez-la au plus tard le *' . $date . '* et ne payez que *' . $price . '* (' . $pct . $saving . " d'économie). "
+            . 'Passé cette date, le montant sera de ' . $full . ".\n";
     }
 }

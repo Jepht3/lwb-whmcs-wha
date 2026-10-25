@@ -28,6 +28,16 @@ function check($label, $actual, $expected)
 
 Settings::inject(['default_country_code' => '243', 'timezone' => 'Africa/Kinshasa', 'quiet_hours' => '21-8']);
 
+// --- Offre paiement anticipé
+use LwbWha\Context;
+$o = Context::earlyOfferText(10, '04/11/2026', '72.20 USD', '3.80 USD', '76.00 USD', 5);
+check('offre : prix remisé conditionnel', $o, "\n🎁 *Offre paiement anticipé* : réglez-la au plus tard le *04/11/2026* et ne payez que *72.20 USD* (-5 %, soit 3.80 USD d'économie). Passé cette date, le montant sera de 76.00 USD.\n");
+check('offre : 2 jours', strpos(Context::earlyOfferText(2, '04/11/2026', 'a', 'b', 'c', 5), '⏳ *Plus que 2 jours*') === 1, true);
+check('offre : 1 jour', strpos(Context::earlyOfferText(1, '04/11/2026', 'a', 'b', 'c', 5), '*Plus que 1 jour*') !== false, true);
+check('offre : dernier jour', strpos(Context::earlyOfferText(0, '04/11/2026', 'a', 'b', 'c', 5), '⏳ *Dernier jour*') === 1, true);
+check('offre : sans pourcentage', strpos(Context::earlyOfferText(9, 'x', '1', '2', '3'), '(2 d\'économie)') !== false, true);
+check('offre : plus de « déjà déduits »', strpos($o, 'déduits'), false);
+
 // --- Rendu
 list($text) = Events::render("{greeting} {first_name}\n{early_discount}\nFin", ['greeting' => 'Bonjour', 'first_name' => 'Awa', 'early_discount' => '']);
 check('variables + ligne vide supprimée', $text, "Bonjour Awa\n\nFin");
