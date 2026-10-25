@@ -9,7 +9,7 @@ if (!defined('WHMCS')) {
 
 foreach ([
     'Settings', 'State', 'Time', 'Events', 'Phone', 'Links', 'Context',
-    'Gateway', 'Sender', 'Queue', 'Inbox', 'Team', 'Alerts', 'Stats', 'Schema', 'Admin',
+    'Gateway', 'Sender', 'Queue', 'Broadcast', 'Inbox', 'Team', 'Alerts', 'Stats', 'Schema', 'Admin',
 ] as $lwbWhaClass) {
     require_once __DIR__ . '/' . $lwbWhaClass . '.php';
 }

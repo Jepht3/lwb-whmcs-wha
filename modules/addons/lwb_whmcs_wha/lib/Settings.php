@@ -12,7 +12,7 @@ use WHMCS\Database\Capsule;
 class Settings
 {
     const MODULE = 'lwb_whmcs_wha';
-    const VERSION = '3.2.0';
+    const VERSION = '3.3.0';
 
     private static $cache;
 

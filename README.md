@@ -46,6 +46,10 @@ WHMCS (boîte de réception, tickets) ◄── cron ◄── passerelle Node.j
   « Pas de notifications WhatsApp », liste des désinscriptions.
 - **Secours** : bascule possible vers WhatsApp Cloud API (officielle), Sent.dm ou une passerelle HTTP.
 
+- **Annonces** (onglet Annonces) : un même message envoyé à un groupe de clients (tous les clients actifs, ou
+  ceux d'un serveur, d'un groupe de produits ou d'un produit), personnalisé avec le prénom et le domaine,
+  envoyé au compte-gouttes hors heures calmes, avec aperçu, suivi et annulation.
+
 ## Anti-bannissement
 
 | Protection | Où |

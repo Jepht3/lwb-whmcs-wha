@@ -20,6 +20,7 @@ class Admin
         'dashboard' => 'Tableau de bord',
         'inbox' => 'Boîte de réception',
         'send' => 'Envoyer',
+        'broadcast' => 'Annonces',
         'templates' => 'Modèles',
         'messages' => 'Messages',
         'stats' => 'Statistiques',
@@ -69,7 +70,7 @@ class Admin
         if ($def) {
             return $def['label'];
         }
-        return ['manual' => 'Message manuel'][$event] ?? $event;
+        return ['manual' => 'Message manuel', Broadcast::EVENT => 'Annonce'][$event] ?? $event;
     }
 
     /**
@@ -222,6 +223,13 @@ class Admin
                     exit;
                 }
                 return $flash . '<p><a href="' . self::h($back) . '">&larr; Retour à la facture</a></p>';
+
+            case 'broadcast':
+                return self::broadcastAction();
+
+            case 'broadcast_cancel':
+                $n = Broadcast::cancel($id);
+                return self::box('success', 'Annonce #' . $id . ' annulée : ' . $n . ' message(s) en attente retiré(s) de la file.');
 
             case 'inbox_reply':
                 $row = Inbox::ready() ? Capsule::table(Inbox::TABLE)->where('id', $id)->first() : null;
@@ -618,6 +626,178 @@ class Admin
             . 'f.addEventListener("change", show); show(); })();</script>';
     }
 
+    // ------------------------------------------------------------------ annonces
+
+    /** Estimation lisible de la durée d'envoi d'une annonce. */
+    private static function broadcastEta($n)
+    {
+        $perHour = Settings::int('broadcast_per_run', 3, 1, 10) * 12;
+        $hours = $n / $perHour;
+        $eta = $hours < 1 ? 'moins d\'une heure' : 'environ ' . (int) ceil($hours) . ' h d\'envoi';
+        return $eta . ' (≈ ' . $perHour . ' messages par heure avec un cron WHMCS toutes les 5 minutes, sans compter les heures calmes '
+            . self::h(Settings::get('quiet_hours', '21-8')) . ' h ni les quotas de la passerelle)';
+    }
+
+    /** Aperçu, envoi de test et lancement d'une annonce (onglet Annonces). */
+    private static function broadcastAction()
+    {
+        Broadcast::ready();
+        $step = (string) ($_POST['step'] ?? 'preview');
+        $message = trim((string) ($_POST['message'] ?? ''));
+        $audience = Broadcast::audience($_POST);
+        if ($message === '') {
+            return self::box('error', 'Le message est vide.');
+        }
+        $r = Broadcast::recipients($audience);
+        $first = $r['ok'] ? array_key_first($r['ok']) : 0;
+        $sample = $first ? Broadcast::text($message, Broadcast::clientVars($first, $r['targets'][$first])) : '';
+
+        if ($step === 'test') {
+            $phone = Phone::normalize((string) ($_POST['test_phone'] ?? ''));
+            if ($phone === '') {
+                return self::box('error', 'Saisissez votre numéro pour recevoir l\'aperçu.');
+            }
+            if (!$first) {
+                return self::box('error', 'Aucun destinataire joignable pour ce ciblage : impossible de remplir l\'aperçu.');
+            }
+            $id = Queue::enqueue([
+                'client_id' => $first, 'event' => Broadcast::EVENT, 'phone' => $phone, 'message' => $sample, 'priority' => 9, 'source' => 'test',
+            ]);
+            $res = Queue::sendNow($id) + ['phone' => $phone];
+            return self::sendResult($res, 'Aperçu envoyé (rempli avec les données du client #' . $first . ')');
+        }
+
+        if ($step === 'launch') {
+            $res = Broadcast::create((string) ($_POST['title'] ?? ''), $message, $audience, (int) ($_POST['days'] ?? 3));
+            if (!$res['ok']) {
+                return self::box('error', self::h($res['error']));
+            }
+            self::$done = true;
+            return self::box('success', 'Annonce #' . $res['id'] . ' lancée : <strong>' . $res['queued'] . '</strong> message(s) en file'
+                . ($res['blocked'] ? ', ' . $res['blocked'] . ' client(s) exclu(s)' : '') . '. ' . self::broadcastEta($res['queued']) . '. '
+                . '<a href="' . self::h(self::url(['tab' => 'messages', 'bid' => $res['id']])) . '">Suivre les envois</a>');
+        }
+
+        // Aperçu : nombre de destinataires, exclusions, exemple de texte.
+        $html = '<strong>' . count($r['ok']) . '</strong> destinataire(s) · ' . self::h(Broadcast::describe($audience));
+        if ($r['ok']) {
+            $html .= '<br>' . self::broadcastEta(count($r['ok'])) . '.';
+        }
+        if ($r['blocked']) {
+            $names = Capsule::table('tblclients')->whereIn('id', array_keys($r['blocked']))->get(['id', 'firstname', 'lastname', 'companyname'])->keyBy('id');
+            $list = '';
+            foreach (array_slice($r['blocked'], 0, 60, true) as $id => $why) {
+                $c = $names[$id] ?? null;
+                $list .= '<li><a href="clientssummary.php?userid=' . (int) $id . '">' . self::h($c ? trim($c->firstname . ' ' . $c->lastname) : '#' . $id) . '</a> : ' . self::h($why) . '</li>';
+            }
+            $html .= '<details style="margin-top:4px"><summary style="cursor:pointer">' . count($r['blocked']) . ' client(s) exclu(s)</summary><ul style="margin:4px 0 0">' . $list
+                . (count($r['blocked']) > 60 ? '<li>…</li>' : '') . '</ul></details>';
+        }
+        if ($sample !== '') {
+            $c = Capsule::table('tblclients')->where('id', $first)->first(['firstname', 'lastname']);
+            $html .= '<div style="margin-top:6px">Exemple pour <strong>' . self::h(trim($c->firstname . ' ' . $c->lastname)) . '</strong> :</div>'
+                . '<pre class="lwb-msg" style="max-width:none;background:#fff">' . self::h($sample) . '</pre>';
+        }
+        return self::box($r['ok'] ? 'info' : 'error', $html);
+    }
+
+    private static function pageBroadcast()
+    {
+        Broadcast::ready();
+        $old = ($_POST['action'] ?? '') === 'broadcast' && !self::$done ? $_POST : [];
+        $a = Broadcast::audience($old);
+        $sel = function ($list, $id) {
+            return in_array((int) $id, $list, true) ? ' selected' : '';
+        };
+        $servers = '';
+        foreach (Capsule::table('tblservers')->orderBy('name')->get(['id', 'name', 'hostname', 'disabled']) as $sv) {
+            $servers .= '<option value="' . (int) $sv->id . '"' . $sel($a['servers'], $sv->id) . '>' . self::h($sv->name . ($sv->hostname ? ' (' . $sv->hostname . ')' : '') . ($sv->disabled ? ' · désactivé' : '')) . '</option>';
+        }
+        $groups = Capsule::table('tblproductgroups')->orderBy('order')->get(['id', 'name']);
+        $groupOptions = '';
+        $productOptions = '';
+        foreach ($groups as $g) {
+            $groupOptions .= '<option value="' . (int) $g->id . '"' . $sel($a['groups'], $g->id) . '>' . self::h($g->name) . '</option>';
+            $products = Capsule::table('tblproducts')->where('gid', $g->id)->orderBy('order')->get(['id', 'name']);
+            if (count($products)) {
+                $productOptions .= '<optgroup label="' . self::h($g->name) . '">';
+                foreach ($products as $p) {
+                    $productOptions .= '<option value="' . (int) $p->id . '"' . $sel($a['products'], $p->id) . '>' . self::h($p->name) . '</option>';
+                }
+                $productOptions .= '</optgroup>';
+            }
+        }
+        $statuses = '';
+        foreach (Broadcast::SERVICE_STATUSES as $k => $label) {
+            $statuses .= '<label style="font-weight:normal;margin-right:12px"><input type="checkbox" name="statuses[]" value="' . $k . '"' . (in_array($k, $a['statuses'], true) ? ' checked' : '') . '> ' . $label . '</label>';
+        }
+        $days = (int) ($old['days'] ?? 3);
+        $daysOptions = '';
+        foreach ([1 => '1 jour', 2 => '2 jours', 3 => '3 jours', 7 => '7 jours'] as $d => $label) {
+            $daysOptions .= '<option value="' . $d . '"' . ($days === $d ? ' selected' : '') . '>' . $label . '</option>';
+        }
+        $vars = implode(' ', array_map(function ($v) {
+            return '<span class="lwb-var">{' . $v . '}</span>';
+        }, Broadcast::vars()));
+        $placeholder = "{greeting} {first_name},\n\nNous avons mis à jour votre hébergement {domain} vers *PHP 8.3*, plus rapide et plus sûr. Aucune action n'est nécessaire de votre part.\n\nUn souci sur votre site ? Répondez simplement à ce message.\n\nL'équipe {company}";
+
+        echo '<div class="lwb-card"><p style="margin:0">Un même message envoyé à un groupe de clients : mise à jour PHP, maintenance, changement de serveur, nouveauté… '
+            . 'Chaque client reçoit un message personnel (prénom, domaine), avec le pied « Répondez STOP ». Les envois partent au compte-gouttes au passage du cron, '
+            . 'après les notifications attendues et hors heures calmes, pour protéger votre numéro. Les clients désinscrits ou sans numéro sont exclus.</p></div>';
+
+        $form = '<p>Titre (interne) : <input type="text" name="title" value="' . self::h($old['title'] ?? '') . '" maxlength="150" placeholder="Ex. Mise à jour PHP 8.3 – serveur 1" class="form-control" style="width:420px;max-width:100%;display:inline-block"></p>'
+            . '<p><textarea name="message" rows="9" class="form-control" placeholder="' . self::h($placeholder) . '" required>' . self::h($old['message'] ?? '') . '</textarea>'
+            . '<small>Variables : ' . $vars . ' · variantes <code>{Bonjour|Hello}</code> · <code>*gras*</code> <code>_italique_</code>. '
+            . '<span class="lwb-var">{domain}</span> = premier domaine concerné, <span class="lwb-var">{domains}</span> = tous, <span class="lwb-var">{service}</span> = offre(s).</small></p>'
+            . '<h4 style="margin-top:18px">Destinataires</h4>'
+            . '<p><label style="font-weight:normal;margin-right:18px"><input type="radio" name="scope" value="clients"' . ($a['scope'] === 'clients' ? ' checked' : '') . '> Tous les clients actifs</label>'
+            . '<label style="font-weight:normal"><input type="radio" name="scope" value="services"' . ($a['scope'] === 'services' ? ' checked' : '') . '> Clients ayant un service précis</label></p>'
+            . '<div id="lwb-bc-services" class="row">'
+            . '<div class="col-md-4"><label>Serveur</label><select name="servers[]" multiple size="6" class="form-control">' . $servers . '</select></div>'
+            . '<div class="col-md-4"><label>Groupe de produits</label><select name="groups[]" multiple size="6" class="form-control">' . $groupOptions . '</select></div>'
+            . '<div class="col-md-4"><label>Produit</label><select name="products[]" multiple size="6" class="form-control">' . $productOptions . '</select></div>'
+            . '<div class="col-md-12" style="margin-top:8px">Statut du service : ' . $statuses
+            . '<br><small class="text-muted">Ctrl/Cmd + clic pour choisir plusieurs éléments. Les critères se cumulent (serveur ET groupe ET produit) ; aucun choix = tous.</small></div></div>'
+            . '<p style="margin-top:14px">Ne plus envoyer après : <select name="days" class="form-control" style="width:auto;display:inline-block">' . $daysOptions . '</select> '
+            . '<small class="text-muted">les messages encore en file passé ce délai sont abandonnés (annonce périmée)</small></p>'
+            . '<p>Votre numéro pour l\'aperçu : <input type="text" name="test_phone" value="' . self::h($old['test_phone'] ?? '') . '" placeholder="+243…" class="form-control" style="width:200px;display:inline-block"></p>'
+            . '<input type="hidden" name="step" value="preview">'
+            . '<button class="btn btn-default" onclick="this.form.step.value=\'preview\'">1. Compter et prévisualiser</button> '
+            . '<button class="btn btn-info" onclick="this.form.step.value=\'test\'">2. M\'envoyer un aperçu</button> '
+            . '<button class="btn btn-success" onclick="this.form.step.value=\'launch\';return confirm(\'Lancer l\\\'annonce ? Les messages partiront progressivement à tous les destinataires affichés par l\\\'aperçu.\')">3. Lancer l\'annonce</button>';
+        echo '<div class="lwb-card">' . self::form('broadcast', 'broadcast', $form, 'id="lwb-bc"') . '</div>'
+            . '<script>(function () { var f = document.getElementById("lwb-bc");'
+            . 'function show() { document.getElementById("lwb-bc-services").style.display = f.querySelector("input[name=scope]:checked").value === "services" ? "" : "none"; }'
+            . 'f.addEventListener("change", show); show(); })();</script>';
+
+        $rows = Capsule::table(Broadcast::TABLE)->orderBy('id', 'desc')->limit(30)->get();
+        echo '<h4>Annonces envoyées</h4><table class="datatable" width="100%"><tr><th>#</th><th>Date</th><th>Titre</th><th>Destinataires</th><th>Envoyés</th><th>Lus</th><th>En attente</th><th>Échecs / ignorés</th><th>Statut</th><th></th></tr>';
+        if (!count($rows)) {
+            echo '<tr><td colspan="10" class="text-muted">Aucune annonce pour le moment.</td></tr>';
+        }
+        $labels = ['active' => ['En cours', 'info'], 'done' => ['Terminée', 'success'], 'cancelled' => ['Annulée', 'default']];
+        foreach ($rows as $b) {
+            $p = Broadcast::progress($b->id);
+            $st = $labels[$b->status] ?? [$b->status, 'default'];
+            if ($b->status === 'active' && strtotime($b->expires_at) < time()) {
+                $st = ['Expirée', 'warning'];
+            }
+            $audience = Broadcast::audience((array) json_decode((string) $b->audience, true));
+            $actions = '<a href="' . self::h(self::url(['tab' => 'messages', 'bid' => $b->id])) . '" class="btn btn-default btn-xs">Détail</a>';
+            if ($b->status === 'active' && $p['pending']) {
+                $actions .= ' ' . self::form('broadcast_cancel', 'broadcast', '<input type="hidden" name="id" value="' . (int) $b->id . '"><button class="btn btn-danger btn-xs">Annuler</button>',
+                    'style="display:inline" onsubmit="return confirm(\'Annuler les ' . $p['pending'] . ' message(s) encore en attente ?\')"');
+            }
+            echo '<tr><td>' . (int) $b->id . '</td><td style="white-space:nowrap">' . self::h(Time::show($b->created_at)) . '</td>'
+                . '<td><strong>' . self::h($b->title) . '</strong><br><small class="text-muted">' . self::h(Broadcast::describe($audience)) . '</small>'
+                . '<details><summary class="text-muted" style="cursor:pointer;font-size:11px">voir le texte</summary><pre class="lwb-msg">' . self::h(Events::dbDecode($b->message)) . '</pre></details></td>'
+                . '<td>' . (int) $b->total . '</td><td>' . $p['sent'] . '</td><td>' . $p['read'] . '</td><td>' . $p['pending'] . '</td><td>' . $p['failed'] . ' / ' . $p['skipped'] . '</td>'
+                . '<td><span class="label label-' . $st[1] . '">' . $st[0] . '</span></td><td style="white-space:nowrap">' . $actions . '</td></tr>';
+        }
+        echo '</table><p class="text-muted"><small>Conseil : réservez les annonces aux informations utiles (technique, sécurité, changement de service). '
+            . 'Les envois promotionnels de masse sont la première cause de blocage d\'un numéro WhatsApp.</small></p>';
+    }
+
     /** Éléments d'un client proposés dans le champ « ID de l'élément », par type d'objet. */
     private static function suggestions($clientId, $invoices)
     {
@@ -703,7 +883,12 @@ class Admin
         $event = (string) ($_GET['event'] ?? '');
         $q = trim((string) ($_GET['q'] ?? ''));
         $page = max(1, (int) ($_GET['p'] ?? 1));
+        $bid = (int) ($_GET['bid'] ?? 0);
         $query = Capsule::table(Queue::TABLE);
+        if ($bid) {
+            $query->where('source', Broadcast::SOURCE)->where('rel_id', $bid);
+            echo '<p>Messages de l\'annonce #' . $bid . ' · <a href="' . self::h(self::url(['tab' => 'messages'])) . '">tous les messages</a></p>';
+        }
         if ($status !== '') {
             $query->where('status', $status);
         }
@@ -734,7 +919,8 @@ class Admin
         foreach (Events::defaults() as $key => $def) {
             $events .= '<option value="' . $key . '"' . ($event === $key ? ' selected' : '') . '>' . self::h($def['label']) . '</option>';
         }
-        $events .= '<option value="manual"' . ($event === 'manual' ? ' selected' : '') . '>Message manuel</option>';
+        $events .= '<option value="manual"' . ($event === 'manual' ? ' selected' : '') . '>Message manuel</option>'
+            . '<option value="' . Broadcast::EVENT . '"' . ($event === Broadcast::EVENT ? ' selected' : '') . '>Annonce</option>';
         echo '<form method="get" class="form-inline" style="margin-bottom:12px"><input type="hidden" name="module" value="' . Settings::MODULE . '"><input type="hidden" name="tab" value="messages">'
             . '<select name="status" class="form-control">' . $options . '</select> <select name="event" class="form-control">' . $events . '</select> '
             . '<input type="text" name="q" value="' . self::h($q) . '" placeholder="ID client ou numéro" class="form-control"> <button class="btn btn-default">Filtrer</button></form>';
@@ -760,6 +946,7 @@ class Admin
                 . '<td>' . ($client ? '<a href="clientssummary.php?userid=' . (int) $r->client_id . '">' . self::h(trim($client->firstname . ' ' . $client->lastname)) . '</a>' : ($r->source === 'team' ? 'Équipe' : '–')) . '</td>'
                 . '<td>' . self::h(self::label($r->event)) . ($r->source === 'test' ? ' <span class="label label-info">aperçu</span>' : '') . ($r->source === 'team' ? ' <span class="label label-default">équipe</span>' : '')
                 . ($r->source === 'manual' && $r->event !== 'manual' ? ' <span class="label label-primary">manuel</span>' : '')
+                . ($r->source === Broadcast::SOURCE ? ' <a href="' . self::h(self::url(['tab' => 'messages', 'bid' => $r->rel_id])) . '" class="label label-warning">#' . (int) $r->rel_id . '</a>' : '')
                 . '<details><summary class="text-muted" style="cursor:pointer;font-size:11px">voir le texte</summary><pre class="lwb-msg">' . self::h(Events::dbDecode($r->message)) . '</pre></details></td>'
                 . '<td>+' . self::h($r->phone) . '</td>'
                 . '<td><span class="label label-' . $lbl[1] . '">' . $lbl[0] . '</span>' . ($r->error ? '<br><small class="text-muted">' . self::h(mb_substr(Events::dbDecode($r->error), 0, 140)) . '</small>' : '') . '</td>'
@@ -769,7 +956,7 @@ class Admin
         if ($total > 50) {
             echo '<p>';
             for ($i = 1; $i <= (int) ceil($total / 50) && $i <= 20; $i++) {
-                echo $i === $page ? ' <strong>' . $i . '</strong> ' : ' <a href="' . self::h(self::url(['tab' => 'messages', 'status' => $status, 'event' => $event, 'q' => $q, 'p' => $i])) . '">' . $i . '</a> ';
+                echo $i === $page ? ' <strong>' . $i . '</strong> ' : ' <a href="' . self::h(self::url(array_filter(['tab' => 'messages', 'status' => $status, 'event' => $event, 'q' => $q, 'bid' => $bid ?: null, 'p' => $i]))) . '">' . $i . '</a> ';
             }
             echo '</p>';
         }

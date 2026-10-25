@@ -201,17 +201,33 @@ class Queue
             })
             ->orderBy('priority', 'desc')->orderBy('id')->limit($batch * 4)->get();
         $sent = 0;
+        // Annonces : quelques messages par passage, espacés, après les notifications attendues.
+        $broadcastMax = Settings::int('broadcast_per_run', 3, 1, 10);
+        $broadcastSent = 0;
         foreach ($rows as $row) {
             if ($sent >= $batch) {
                 break;
             }
+            $isBroadcast = $row->source === Broadcast::SOURCE;
+            if ($isBroadcast) {
+                if ($broadcastSent >= $broadcastMax) {
+                    continue;
+                }
+                if ($broadcastSent > 0) {
+                    sleep(random_int(Settings::int('broadcast_gap_min', 15, 3, 120), Settings::int('broadcast_gap_max', 35, 5, 180)));
+                }
+            }
             $result = self::sendRow($row);
             if ($result === 'sent') {
                 $sent++;
+                if ($isBroadcast) {
+                    $broadcastSent++;
+                }
             } elseif ($result === 'stop') {
                 break;
             }
         }
+        Broadcast::close();
     }
 
     /**
@@ -234,7 +250,7 @@ class Queue
                 self::finish($row->id, 'expired', 'Délai de validité dépassé (' . $def['ttl'] . ' h)');
                 return 'skip';
             }
-            if (!$force && $row->source === 'auto') {
+            if (!$force && in_array($row->source, ['auto', Broadcast::SOURCE], true)) {
                 $wait = self::pacing($row->phone);
                 if ($wait !== null) {
                     Capsule::table(self::TABLE)->where('id', $row->id)->update(['status' => 'pending', 'next_try' => $wait]);
@@ -242,6 +258,14 @@ class Queue
                 }
             }
             $text = Events::dbDecode($row->message);
+            if ($row->source === Broadcast::SOURCE) {
+                list($fresh, $reason) = Broadcast::prepare($row);
+                if ($reason !== null) {
+                    self::finish($row->id, 'skipped', 'Plus d\'actualité : ' . $reason);
+                    return 'skip';
+                }
+                $text = $fresh;
+            }
             $tpl = null;
             $ordered = [];
             $named = [];

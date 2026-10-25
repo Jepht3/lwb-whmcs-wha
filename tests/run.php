@@ -158,5 +158,18 @@ check('échec signalé et échappé', strpos($html, 'errorbox') !== false && str
 check('refus avant envoi', strpos(Admin::sendResult(['ok' => false, 'error' => 'Élément introuvable'], 'Message envoyé'), 'errorbox') !== false, true);
 check('libellé échappé', strpos(Admin::sendResult(['ok' => true, 'phone' => '1', 'text' => ''], 'Notification « <x> » envoyée'), 'Notification « &lt;x&gt; » envoyée au +1.') !== false, true);
 
+// --- Annonces
+use LwbWha\Broadcast;
+$a = Broadcast::audience([]);
+check('annonce : tous les clients par défaut', $a, ['scope' => 'clients', 'servers' => [], 'groups' => [], 'products' => [], 'statuses' => ['Active']]);
+$a = Broadcast::audience(['scope' => 'services', 'servers' => ['3', '3', 'x', '0'], 'groups' => [9], 'statuses' => ['Suspended', 'Hack']]);
+check('annonce : filtres nettoyés', $a, ['scope' => 'services', 'servers' => [3], 'groups' => [9], 'products' => [], 'statuses' => ['Suspended']]);
+check('annonce : statut actif si aucun valide', Broadcast::audience(['scope' => 'services', 'statuses' => ['Nope']])['statuses'], ['Active']);
+check('annonce : description', Broadcast::describe(Broadcast::audience([])), 'Tous les clients actifs');
+check('annonce : variables', in_array('domain', Broadcast::vars(), true) && in_array('domains', Broadcast::vars(), true), true);
+$t = Broadcast::text("{greeting} {first_name}, votre site {domain} passe à PHP 8.3.", ['greeting' => 'Bonjour', 'first_name' => 'Awa', 'domain' => 'exemple.cd']);
+check('annonce : texte + pied STOP', $t, "Bonjour Awa, votre site exemple.cd passe à PHP 8.3.\n\nRépondez STOP pour ne plus recevoir ces messages.");
+check('annonce : variable absente vidée', Broadcast::text('Site : {domains}.', []), "Site : .\n\nRépondez STOP pour ne plus recevoir ces messages.");
+
 echo $count - $failures . " / $count tests réussis\n";
 exit($failures ? 1 : 0);

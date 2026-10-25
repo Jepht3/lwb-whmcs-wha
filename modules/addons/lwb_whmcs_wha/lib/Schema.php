@@ -97,6 +97,7 @@ class Schema
             });
         }
 
+        Broadcast::ready();
         self::seedTemplates();
         self::customFields();
         self::migrateFromWhatsappNotify();

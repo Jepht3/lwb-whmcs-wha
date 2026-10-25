@@ -1,5 +1,19 @@
 # Journal des versions
 
+## 3.3.0 — 2026-10-25
+
+**Module WHMCS**
+- Nouvel onglet **Annonces** : un même message (mise à jour PHP, maintenance, changement de serveur…) envoyé à
+  un groupe de clients. Ciblage : tous les clients actifs, ou les clients ayant un service sur un serveur, dans
+  un groupe de produits ou pour un produit précis, selon le statut du service. Chaque client reçoit un message
+  personnel ({first_name}, {domain}, {domains}, {service}) avec le pied « Répondez STOP ».
+- Aperçu avant lancement : nombre de destinataires, clients exclus (sans numéro, désinscrits, numéro en double)
+  et exemple de texte ; envoi d'un aperçu sur votre numéro.
+- Envoi au compte-gouttes : priorité basse (après les notifications attendues), hors heures calmes, 3 messages
+  par passage du cron espacés de 15 à 35 secondes (réglage « Annonces : messages par cron »), espacement et
+  plafond quotidien par client. Texte recomposé à l'envoi ; délai de validité ; annulation des messages restants.
+- Suivi par annonce : envoyés, lus, en attente, échecs ; détail dans l'onglet Messages.
+
 ## Non publié — 2026-10-25
 
 **Module WHMCS**

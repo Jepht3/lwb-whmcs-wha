@@ -96,6 +96,13 @@ function lwb_whmcs_wha_config()
                 'Size' => '4',
                 'Default' => '3',
             ],
+            'broadcast_per_run' => [
+                'FriendlyName' => 'Annonces : messages par cron',
+                'Type' => 'text',
+                'Size' => '4',
+                'Default' => '3',
+                'Description' => 'Messages d\'annonce envoyés à chaque passage du cron (1 à 10), espacés de 15 à 35 secondes',
+            ],
             'optout_footer' => [
                 'FriendlyName' => 'Anti-ban : pied de message',
                 'Type' => 'text',
